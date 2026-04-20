@@ -532,7 +532,7 @@ wheels = [
 
 [[package]]
 name = "scpc"
-version = "0.1.0"
+version = "0.1.0b1"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
@@ -544,14 +544,10 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "coverage" },
-    { name = "numpy" },
-    { name = "pandas" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
-    { name = "scipy" },
-    { name = "statsmodels" },
     { name = "ty" },
 ]
 
@@ -566,14 +562,10 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "coverage", specifier = ">=7.10.6" },
-    { name = "numpy", specifier = ">=2.3.4" },
-    { name = "pandas", specifier = ">=2.3.3" },
     { name = "pre-commit", specifier = ">=4.3.0" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "ruff", specifier = ">=0.13.0" },
-    { name = "scipy", specifier = ">=1.16.3" },
-    { name = "statsmodels", specifier = ">=0.14.5" },
     { name = "ty", specifier = ">=0.0.18" },
 ]
 
