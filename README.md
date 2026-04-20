@@ -41,7 +41,7 @@ and move directly to the regression plus `scpc` step.
 ```python
 # assumes spur-python is installed
 from spur import load_chetty_data, spurtransform
-import scpc
+from scpc import scpc
 import statsmodels.formula.api as smf
 
 data = load_chetty_data()
@@ -52,10 +52,11 @@ data = data[~data["state"].isin(["AK", "HI"])][
 data = data.dropna(subset=["am", "gini", "fracblack", "lat", "lon"]).copy()
 
 transformed = spurtransform(
+    "am ~ gini + fracblack",
     data,
-    ["am", "gini", "fracblack"],
-    ["lat", "lon"],
-    method="lbmgls",
+    lon="lon",
+    lat="lat",
+    transformation="lbmgls",
     prefix="h_",
 )
 
@@ -85,14 +86,12 @@ result = scpc(
 The most important `scpc()` arguments in the workflow above are:
 
 - `model`: the fitted regression model
-- `data`: the data frame that still contains the coordinate columns
+- `data`: the data frame
 - `lon`, `lat`: the geodesic coordinate column names
-- `coord_euclidean`: use this instead of `lon` / `lat` when coordinates are
+- `coords_euclidean`: use this instead of `lon` / `lat` when coordinates are
   Euclidean rather than geographic
 - `cluster`: optional clustering column
 - `ncoef`: how many coefficients to report
 - `avc`: upper bound on the average pairwise correlation
 - `uncond`: whether to skip the conditional adjustment
 - `cvs`: whether to store the extra critical values
-- `k`: deprecated alias for `ncoef`, retained for compatibility with the R and
-  Stata interface
