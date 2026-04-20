@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCPC_R_GITHUB = "pdavidboll/scpcR"
-SCPC_R_COMMIT = "62aa9d1a41a78927a287d503b1802ad448877ccb"
-SCPC_R_LIBRARY = PROJECT_ROOT / ".pytest_cache" / "scpcR" / SCPC_R_COMMIT / "lib"
+SCPC_R_GITHUB = "spatial-spur/scpcR"
+SCPC_R_REF = "v0.1.0b1"
+SCPC_R_LIBRARY = PROJECT_ROOT / ".pytest_cache" / "scpcR" / SCPC_R_REF / "lib"
 R: str | None = shutil.which("Rscript")
 
 
@@ -38,7 +38,7 @@ def ensure_scpc_r_installed() -> None:
         }}
 
         remotes::install_github(
-          "{SCPC_R_GITHUB}@{SCPC_R_COMMIT}",
+          "{SCPC_R_GITHUB}@{SCPC_R_REF}",
           lib = .libPaths()[1],
           upgrade = "never",
           dependencies = TRUE,
