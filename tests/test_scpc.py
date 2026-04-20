@@ -27,7 +27,7 @@ def test_scpc_returns_a_result_with_the_expected_structure() -> None:
     result = scpc(
         model,
         data,
-        coord_euclidean=("coord_x", "coord_y"),
+        coords_euclidean=("coord_x", "coord_y"),
         avc=0.1,
         uncond=True,
         cvs=False,
@@ -50,7 +50,7 @@ def test_python_r_parity_scpc() -> None:
             "coord_x": [0.0, 1.0, 0.5, 1.5, 2.0],
             "coord_y": [0.0, 0.0, 1.0, 1.0, 1.5],
         },
-        "coord_euclidean": ["coord_x", "coord_y"],
+        "coords_euclidean": ["coord_x", "coord_y"],
         "avc": 0.1,
     }
     data = pd.DataFrame(payload["data"], index=[1, 2, 3, 4, 5])
@@ -68,7 +68,8 @@ def test_python_r_parity_scpc() -> None:
         out <- scpc(
           fit,
           data = d,
-          coord_euclidean = unlist(payload$coord_euclidean),
+          # TODO: rename this to `coords_euclidean` once scpcR adopts the planned API.
+          coord_euclidean = unlist(payload$coords_euclidean),
           avc = payload$avc,
           uncond = TRUE,
           cvs = FALSE
@@ -86,7 +87,7 @@ def test_python_r_parity_scpc() -> None:
     py_value = scpc(
         model,
         data,
-        coord_euclidean=tuple(payload["coord_euclidean"]),
+        coords_euclidean=tuple(payload["coords_euclidean"]),
         avc=payload["avc"],
         uncond=True,
         cvs=False,
@@ -99,3 +100,35 @@ def test_python_r_parity_scpc() -> None:
     assert py_value.c0 == pytest.approx(r_value["c0"], abs=ATOL, rel=RTOL)
     assert py_value.cv == pytest.approx(r_value["cv"], abs=ATOL, rel=RTOL)
     assert py_value.q == r_value["q"]
+
+
+def test_scpc_requires_keyword_only_options() -> None:
+    data = pd.DataFrame(
+        {
+            "y": [1.0, 1.8, 2.9, 3.7, 5.1],
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0],
+            "lon": [0.0, 1.0, 0.5, 1.5, 2.0],
+            "lat": [0.0, 0.0, 1.0, 1.0, 1.5],
+        },
+        index=[1, 2, 3, 4, 5],
+    )
+    model = smf.ols("y ~ x", data=data).fit()
+
+    with pytest.raises(TypeError):
+        scpc(model, data, "lon", "lat")
+
+
+def test_scpc_no_longer_accepts_k() -> None:
+    data = pd.DataFrame(
+        {
+            "y": [1.0, 1.8, 2.9, 3.7, 5.1],
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0],
+            "coord_x": [0.0, 1.0, 0.5, 1.5, 2.0],
+            "coord_y": [0.0, 0.0, 1.0, 1.0, 1.5],
+        },
+        index=[1, 2, 3, 4, 5],
+    )
+    model = smf.ols("y ~ x", data=data).fit()
+
+    with pytest.raises(TypeError, match="k"):
+        scpc(model, data, k=1)

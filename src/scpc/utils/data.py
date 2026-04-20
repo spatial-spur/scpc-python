@@ -126,7 +126,7 @@ def resolve_coords_input(
     obs_index: ArrayLike,
     lon: str | None,
     lat: str | None,
-    coord_euclidean: Sequence[str] | None,
+    coords_euclidean: Sequence[str] | None,
 ) -> CoordinateData:
     """Normalize the location information used for spatial distances.
 
@@ -140,7 +140,7 @@ def resolve_coords_input(
         obs_index: Indices of the observations used by the model.
         lon: Longitude column name for geodesic coordinates.
         lat: Latitude column name for geodesic coordinates.
-        coord_euclidean: Euclidean coordinate column names.
+        coords_euclidean: Euclidean coordinate column names.
 
     Returns:
         The normalized coordinate representation used by the spatial engine.
@@ -149,12 +149,12 @@ def resolve_coords_input(
         ValueError: Raised later for invalid or inconsistent coordinate input.
     """
     use_geodesic = lon is not None or lat is not None
-    use_euclidean = coord_euclidean is not None
+    use_euclidean = coords_euclidean is not None
 
     if use_geodesic and use_euclidean:
-        raise ValueError("Specify either `lon`/`lat` or `coord_euclidean`, not both.")
+        raise ValueError("Specify either `lon`/`lat` or `coords_euclidean`, not both.")
     if not use_geodesic and not use_euclidean:
-        raise ValueError("Specify coordinates via `lon`/`lat` or `coord_euclidean`.")
+        raise ValueError("Specify coordinates via `lon`/`lat` or `coords_euclidean`.")
 
     # obs_index follows the R helper and is therefore 1-based.
     obs_index = np.asarray(obs_index, dtype=int) - 1
@@ -184,21 +184,21 @@ def resolve_coords_input(
         return CoordinateData(coords=np.asarray(coords, dtype=float), latlong=True)
 
     if (
-        isinstance(coord_euclidean, str)
-        or coord_euclidean is None
-        or len(coord_euclidean) < 1
+        isinstance(coords_euclidean, str)
+        or coords_euclidean is None
+        or len(coords_euclidean) < 1
     ):
         raise ValueError(
-            "`coord_euclidean` must be a character vector with at least one column name."
+            "`coords_euclidean` must be a list or tuple of one or more column names."
         )
 
-    miss = sorted(set(coord_euclidean) - set(data.columns))
+    miss = sorted(set(coords_euclidean) - set(data.columns))
     if miss:
         raise ValueError(f"Coordinate variables not found in data: {', '.join(miss)}")
 
-    coords = data.iloc[obs_index][list(coord_euclidean)]
+    coords = data.iloc[obs_index][list(coords_euclidean)]
     if not all(np.issubdtype(dtype, np.number) for dtype in coords.dtypes):
-        raise ValueError("`coord_euclidean` columns must be numeric.")
+        raise ValueError("`coords_euclidean` columns must be numeric.")
     if not np.isfinite(np.asarray(coords, dtype=float)).all():
         raise ValueError("Euclidean coordinates must be finite.")
 

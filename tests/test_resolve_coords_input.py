@@ -39,7 +39,7 @@ def test_python_r_parity_resolve_coords_input() -> None:
             "coord_y": [0.0, 1.0, 1.5, 2.0],
         },
         "obs_index": [1, 2, 4],
-        "coord_euclidean": ["coord_x", "coord_y"],
+        "coords_euclidean": ["coord_x", "coord_y"],
     }
     data = pd.DataFrame(payload["data"], index=[1, 2, 3, 4])
 
@@ -54,7 +54,7 @@ def test_python_r_parity_resolve_coords_input() -> None:
           unlist(payload$obs_index),
           NULL,
           NULL,
-          unlist(payload$coord_euclidean)
+          unlist(payload$coords_euclidean)
         )
         result <- list(
           coords = unname(split(out$coords, row(out$coords))),
@@ -68,7 +68,7 @@ def test_python_r_parity_resolve_coords_input() -> None:
         np.array(payload["obs_index"]),
         None,
         None,
-        tuple(payload["coord_euclidean"]),
+        tuple(payload["coords_euclidean"]),
     )
 
     npt.assert_allclose(

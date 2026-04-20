@@ -20,15 +20,15 @@ from .utils.spatial import get_cv, get_distmat, get_oms, max_rp, set_oms_wfin
 def scpc(
     model: ModelLike,
     data: DataFrameLike,
+    *,
     lon: str | None = None,
     lat: str | None = None,
-    coord_euclidean: Sequence[str] | None = None,
+    coords_euclidean: Sequence[str] | None = None,
     cluster: str | None = None,
     ncoef: int | None = None,
     avc: float = 0.03,
     uncond: bool = False,
     cvs: bool = False,
-    k: int | None = None,
 ) -> SCPCResult:
     """Run spatial correlation-robust inference.
 
@@ -41,13 +41,12 @@ def scpc(
         data: Data used to fit the model.
         lon: Longitude column name for geodesic coordinates.
         lat: Latitude column name for geodesic coordinates.
-        coord_euclidean: Euclidean coordinate column names.
+        coords_euclidean: Euclidean coordinate column names.
         cluster: Optional clustering column.
         ncoef: Number of coefficients to report.
         avc: Upper bound on average pairwise correlation.
         uncond: Whether to skip the conditional adjustment.
         cvs: Whether to return additional critical values.
-        k: Backward-compatible alias for `ncoef`.
 
     Returns:
         The fitted SCPC result object.
@@ -55,13 +54,6 @@ def scpc(
     Raises:
         ValueError: Raised later for invalid combinations of arguments.
     """
-
-    # TODO: not sure we really need to keep anything backward compatible since ther
-    # isnt really anything to go back to
-    if k is not None:
-        if ncoef is not None:
-            raise ValueError("Specify either `ncoef` or `k`, not both.")
-        ncoef = k
 
     if avc <= 0.001 or avc >= 0.99:
         raise ValueError("Option avc() must be in (0.001, 0.99).")
@@ -91,7 +83,7 @@ def scpc(
         )
 
     obs_index = get_obs_index(model, data)
-    coord_info = resolve_coords_input(data, obs_index, lon, lat, coord_euclidean)
+    coord_info = resolve_coords_input(data, obs_index, lon, lat, coords_euclidean)
     coords = np.asarray(coord_info.coords, dtype=float)
     latlong = coord_info.latlong
 
