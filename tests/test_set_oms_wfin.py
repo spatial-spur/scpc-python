@@ -48,6 +48,14 @@ def test_set_oms_wfin_returns_a_coherent_spatial_setup() -> None:
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "scpcR v0.1.0b1 changed .setOmsWfin to take coords + latlong and "
+        "to support the newer large-n branch; Python still ports the older "
+        "distance-matrix exact helper"
+    ),
+)
 def test_python_r_parity_set_oms_wfin() -> None:
     distmat = [
         [0.0, 1.0, 2.0],
@@ -56,6 +64,9 @@ def test_python_r_parity_set_oms_wfin() -> None:
     ]
     avc0 = 0.1
 
+    # TODO: this parity test is intentionally pinned to the older r helper contract.
+    # when python is upgraded to match the current public scpcr interface and
+    # the >3500 observation branch, remove this xfail and rewrite the r call.
     r_value = execute_r_code(
         """
         out <- getFromNamespace(".setOmsWfin", "scpcR")(
