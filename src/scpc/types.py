@@ -12,99 +12,62 @@ DataFrameLike: TypeAlias = Any
 
 @dataclass(slots=True)
 class CoordinateData:
-    """Normalized coordinates for spatial distance calculations.
-
-    This record holds the observation-aligned coordinate matrix together with
-    the information needed to interpret those coordinates correctly. In this
-    package, locations can come in either as longitude/latitude pairs or as
-    ordinary Euclidean coordinates. `CoordinateData` gives the rest of the
-    code one consistent representation of that information.
-
-    Attributes:
-        coords: Numeric coordinate matrix aligned to the model observations.
-        latlong: Whether the coordinates should be treated as longitude and
-            latitude rather than Euclidean coordinates.
-    """
+    """Coordinates aligned to the active observations."""
 
     coords: MatrixLike
+    """Coordinate matrix for the rows used in the model."""
     latlong: bool
+    """Whether the coordinates are longitude/latitude rather than Euclidean."""
 
 
 @dataclass(slots=True)
 class ConditionalProjectionSetup:
-    """Regressor information for the conditional SCPC adjustment.
-
-    This record contains the regression-side objects needed to build the
-    conditional projection basis. In higher-level terms, it represents the
-    covariate space that spatial directions must be made orthogonal to before
-    conditional SCPC inference can be computed.
-
-    Attributes:
-        model_mat: Regression design matrix aligned to the active observations.
-        include_intercept: Whether the conditional projection should include an
-            explicit intercept column.
-        fixef_id: Optional fixed-effect identifiers used for demeaning.
-    """
+    """Regression-side inputs used for the conditional adjustment."""
 
     model_mat: MatrixLike
+    """Design matrix aligned to the rows kept in the model."""
     include_intercept: bool
+    """Whether the adjustment should include an intercept term."""
     fixef_id: ArrayLike | None
+    """Fixed-effect identifiers used for demeaning, if any."""
 
 
 @dataclass(slots=True)
 class SpatialSetup:
-    """Spatial reference objects derived from the distance matrix.
-
-    This record gathers the main outputs of the spatial setup stage: the final
-    projection basis, the critical value attached to that basis, the omega
-    grid used for size control, and the kernel scales behind those objects.
-    It exists so the main inference routine can pass around one coherent
-    description of the spatial environment.
-
-    Attributes:
-        wfin: Final spatial projection matrix.
-        cvfin: Critical value attached to the final projection.
-        omsfin: Omega matrices over the spatial correlation grid.
-        c0: Kernel scale matching the target average correlation bound.
-        cmax: Largest kernel scale used in the spatial grid search.
-    """
+    """Spatial reference objects built from the distance matrix."""
 
     wfin: MatrixLike
+    """Final spatial projection matrix used for inference."""
     cvfin: float
+    """Critical value attached to the final projection."""
     omsfin: list[MatrixLike]
+    """Omega matrices evaluated over the spatial correlation grid."""
     c0: float
+    """Kernel scale implied by the chosen correlation bound."""
     cmax: float
+    """Largest kernel scale used in the spatial grid search."""
 
 
 @dataclass(slots=True)
 class SCPCResult:
-    """SCPC estimates, intervals, and projection metadata.
-
-    This is the main user-facing result type returned by `scpc()`. It keeps
-    together the estimated coefficient table, any stored critical values, and
-    the spatial projection information that explains how the inference was
-    constructed.
-
-    Attributes:
-        scpcstats: Main result table with estimates, standard errors, test
-            statistics, p-values, and confidence interval endpoints.
-        scpccvs: Optional table of stored critical values at supported levels.
-        w: Final spatial projection matrix used for inference.
-        avc: Average pairwise correlation bound supplied by the user.
-        c0: Kernel scale implied by `avc`.
-        cv: Unconditional 5 percent critical value.
-        q: Number of non-constant spatial principal components retained.
-        call: Optional textual representation of the original call.
-    """
+    """Main result returned by `scpc()`."""
 
     scpcstats: MatrixLike
+    """Main output table with estimates, standard errors, tests, and intervals."""
     scpccvs: MatrixLike | None
+    """Stored critical values, when requested."""
     w: MatrixLike
+    """Final spatial projection matrix used for inference."""
     avc: float
+    """Average correlation bound supplied by the user."""
     c0: float
+    """Kernel scale implied by `avc`."""
     cv: float
+    """Default 5 percent critical value used for intervals."""
     q: int
+    """Number of spatial components kept in the final projection."""
     call: str | None = None
+    """Text version of the original call, when available."""
 
     def __repr__(self) -> str:
         """Return a developer-oriented representation of the result.
