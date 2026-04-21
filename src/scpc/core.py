@@ -14,7 +14,15 @@ from .utils.data import (
     resolve_coords_input,
 )
 from .utils.matrix import orthogonalize_w, orthogonalize_w_cluster
-from .utils.spatial import get_cv, get_distmat, get_oms, max_rp, set_oms_wfin
+from .utils.spatial import (
+    get_cv,
+    get_oms,
+    lnget_oms,
+    max_rp,
+    set_oms_wfin,
+    validate_large_n_seed,
+    validate_scpc_method,
+)
 
 
 def scpc(
@@ -27,6 +35,8 @@ def scpc(
     cluster: str | None = None,
     ncoef: int | None = None,
     avc: float = 0.03,
+    method: str = "auto",
+    large_n_seed: int = 1,
     uncond: bool = False,
     cvs: bool = False,
 ) -> SCPCResult:
@@ -45,6 +55,8 @@ def scpc(
         cluster: Optional clustering column.
         ncoef: Number of coefficients to report.
         avc: Upper bound on average pairwise correlation.
+        method: Requested spatial method.
+        large_n_seed: Seed for the large-n approximation branch.
         uncond: Whether to skip the conditional adjustment.
         cvs: Whether to return additional critical values.
 
@@ -57,6 +69,8 @@ def scpc(
 
     if avc <= 0.001 or avc >= 0.99:
         raise ValueError("Option avc() must be in (0.001, 0.99).")
+    method = validate_scpc_method(method)
+    large_n_seed = validate_large_n_seed(large_n_seed)
 
     resid = np.asarray(model.resid, dtype=float)
     model_mat = get_scpc_model_matrix(model)
@@ -88,6 +102,8 @@ def scpc(
     latlong = coord_info.latlong
 
     cl_idx: np.ndarray | None = None
+    cl_levels: np.ndarray | None = None
+    cl_values: np.ndarray | None = None
     if cluster is not None:
         if not isinstance(cluster, str) or not cluster:
             raise ValueError("`cluster` must be a single column name.")
@@ -100,7 +116,7 @@ def scpc(
             )
 
         cl_values = np.asarray(data.iloc[np.asarray(obs_index, dtype=int) - 1][cluster])
-        _, cl_idx = np.unique(cl_values, return_inverse=True)
+        cl_levels, cl_idx = np.unique(cl_values, return_inverse=True)
 
         coord_by_cl = np.zeros((cl_idx.max() + 1, coords.shape[1]), dtype=float)
         np.add.at(coord_by_cl, cl_idx, coords)
@@ -127,12 +143,25 @@ def scpc(
     if coords.shape[1] == 1:
         coords = np.column_stack((coords, np.zeros(coords.shape[0])))
 
-    d = get_distmat(coords, latlong)
-    spc = set_oms_wfin(d, avc)
+    spc = set_oms_wfin(
+        coords,
+        avc,
+        latlong,
+        method=method,
+        large_n_seed=large_n_seed,
+    )
+    d = None
+    if not spc.large_n:
+        if spc.distmat is None:
+            raise ValueError("Internal error: exact SCPC setup is missing `distmat`.")
+        d = np.asarray(spc.distmat, dtype=float)
+
     wfin = np.asarray(spc.wfin, dtype=float)
     cvfin = spc.cvfin
     omsfin = spc.omsfin
+    perm = np.asarray(spc.perm, dtype=int)
     q = wfin.shape[1] - 1
+    large_n_random_state = spc.random_state
 
     bread_inv = np.asarray(model.normalized_cov_params, dtype=float)
 
@@ -150,40 +179,78 @@ def scpc(
 
     for j in range(k_use):
         wj = neff * (bread_inv[j, :] @ s.T) + coef[j]
+        wj_perm = wj[perm]
 
         tau_u = (
             math.sqrt(q)
-            * np.dot(wfin[:, 0], wj)
-            / math.sqrt(np.sum((wfin[:, 1:].T @ wj) ** 2))
+            * np.dot(wfin[:, 0], wj_perm)
+            / math.sqrt(np.sum((wfin[:, 1:].T @ wj_perm) ** 2))
         )
-        se = math.sqrt(np.sum((wfin[:, 1:].T @ wj) ** 2)) / (
+        se = math.sqrt(np.sum((wfin[:, 1:].T @ wj_perm) ** 2)) / (
             math.sqrt(q) * math.sqrt(neff)
         )
         p_u = max_rp(omsfin, q, abs(tau_u) / math.sqrt(q))[0]
 
         if not uncond:
             if cluster is not None and cl_idx is not None:
+                if cl_values is None or cl_levels is None:
+                    raise ValueError(
+                        "Internal error: clustered SCPC is missing cluster labels."
+                    )
+
+                cl_idx_scpc = cl_idx
+                if spc.large_n and not np.array_equal(
+                    perm, np.arange(len(perm), dtype=int)
+                ):
+                    # the sampled large-n branch reorders clusters before building w.
+                    level_to_code = {
+                        level: i for i, level in enumerate(cl_levels[perm])
+                    }
+                    cl_idx_scpc = np.array(
+                        [level_to_code[value] for value in cl_values], dtype=int
+                    )
+
                 xj_indiv = neff * (bread_inv[j, :] @ model_mat_cond.T)
                 wx = orthogonalize_w_cluster(
                     wfin,
-                    cl_values,
+                    cl_idx_scpc,
                     xj_indiv,
                     model_mat_cond,
                     include_intercept=cond_include_intercept,
                 )
             else:
                 xj = neff * (bread_inv[j, :] @ model_mat_cond.T)
+                xj = xj[perm]
                 xjs = np.sign(xj)
                 wx = orthogonalize_w(
                     wfin,
                     xj,
                     xjs,
-                    model_mat_cond,
+                    model_mat_cond[perm, :],
                     include_intercept=cond_include_intercept,
                     fixef_id=cond_fixef_id,
                 )
 
-            omsx = get_oms(d, spc.c0, spc.cmax, wx, 1.2)
+            if spc.large_n:
+                # this reuses the sampled omega construction from the large-n setup.
+                omsx, large_n_random_state = lnget_oms(
+                    spc.coords,
+                    spc.c0,
+                    spc.cmax,
+                    wx,
+                    1.2,
+                    capM=1_000_000,
+                    random_t=large_n_random_state
+                    if large_n_random_state is not None
+                    else 1,
+                    latlong=latlong,
+                )
+            else:
+                if d is None:
+                    raise ValueError(
+                        "Internal error: exact SCPC conditional branch is missing `distmat`."
+                    )
+                omsx = get_oms(d, spc.c0, spc.cmax, wx, 1.2)
             p_c = max_rp(omsx, q, abs(tau_u) / math.sqrt(q))[0]
             cvx = get_cv(omsx, q, 0.05)
             p_final = max(p_u, p_c)
@@ -221,5 +288,7 @@ def scpc(
         c0=spc.c0,
         cv=cvfin,
         q=q,
+        method=spc.method,
+        large_n_seed=large_n_seed,
         call=None,  # TODO: add string representation or remove from result
     )

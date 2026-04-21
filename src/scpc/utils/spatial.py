@@ -4,9 +4,18 @@ import math
 
 import numpy as np
 from scipy import stats
+from scipy.sparse.linalg import eigsh
 
 from ..types import ArrayLike, MatrixLike, SpatialSetup
-from .matrix import get_w, lvech
+from .matrix import demeanmat, get_w, lvech
+
+LARGE_N_THRESHOLD = 4500
+LARGE_N_CAPN = 20
+LARGE_N_CAPM = 1_000_000
+LARGE_N_M = 1000
+CGRIDFAC = 1.2
+MINAVC = 0.00001
+UINT32_MOD = 2**32
 
 GQX, GQW = np.polynomial.legendre.leggauss(40)
 GQX = GQX * 0.5 + 0.5
@@ -75,6 +84,239 @@ def get_distmat(s: MatrixLike, latlong: bool) -> MatrixLike:
         d = np.sqrt(np.sum((s[:, None, :] - s[None, :, :]) ** 2, axis=2))
 
     return d
+
+
+def get_distvec(s1: MatrixLike, s2: MatrixLike, latlong: bool) -> ArrayLike:
+    """Compute paired distances between two coordinate matrices."""
+    s1 = np.asarray(s1, dtype=float)
+    s2 = np.asarray(s2, dtype=float)
+
+    if s1.shape != s2.shape:
+        raise ValueError(
+            "Internal error: paired distance inputs must have matching dimensions."
+        )
+
+    if latlong:
+        lon1 = np.radians(s1[:, 0])
+        lat1 = np.radians(s1[:, 1])
+        lon2 = np.radians(s2[:, 0])
+        lat2 = np.radians(s2[:, 1])
+        dlon = 0.5 * (lon1 - lon2)
+        dlat = 0.5 * (lat1 - lat2)
+        return (
+            np.arcsin(
+                np.sqrt(
+                    np.sin(dlat) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon) ** 2
+                )
+            )
+            / math.pi
+        )
+
+    return np.sqrt(np.sum((s1 - s2) ** 2, axis=1))
+
+
+def normalize_s(s: MatrixLike, latlong: bool) -> tuple[MatrixLike, ArrayLike]:
+    """Normalize coordinates for the large-n approximation branch."""
+    s = np.asarray(s, dtype=float)
+    if s.ndim == 1:
+        s = s.reshape(-1, 1)
+
+    if not latlong:
+        s = s - np.mean(s, axis=0, keepdims=True)
+        evals, rot = np.linalg.eigh(s.T @ s)
+        rot = rot[:, np.argsort(evals)[::-1]]
+        s = s @ rot
+
+        # this keeps the randomized branch in a fixed orientation.
+        if np.max(s[:, 0]) != np.max(np.abs(s[:, 0])):
+            s = -s
+
+        perm = np.lexsort(tuple(s[:, col] for col in range(s.shape[1] - 1, -1, -1)))
+        s = s[perm, :]
+        s = s - np.min(s, axis=0, keepdims=True)
+        smax = np.max(s)
+        if np.isfinite(smax) and smax > 0:
+            s = s / smax
+        return s, perm.astype(int)
+
+    s = s.copy()
+    s[:, 0] = s[:, 0] - np.mean(s[:, 0])
+    s[:, 0] = ((s[:, 0] + 180.0) % 360.0) - 180.0
+    perm = np.lexsort((s[:, 0], s[:, 1]))
+    s = s[perm, :]
+    return s, perm.astype(int)
+
+
+def next_u(random_t: int) -> tuple[float, int]:
+    """Advance the large-n pseudo-random state by one step."""
+    random_t = (64389 * int(random_t) + 1) % UINT32_MOD
+    return random_t / UINT32_MOD, random_t
+
+
+def jumble_s(s: MatrixLike, m: int, random_t: int) -> tuple[MatrixLike, int]:
+    """Randomly jumble the first `m` rows of the coordinate matrix."""
+    s = np.array(s, dtype=float, copy=True)
+    if s.ndim == 1:
+        s = s.reshape(-1, 1)
+
+    n = s.shape[0]
+    for i in range(m):
+        _, random_t = next_u(random_t)
+        j = int((random_t * n) // UINT32_MOD)
+        tmp = s[j, :].copy()
+        s[j, :] = s[i, :]
+        s[i, :] = tmp
+    return s, random_t
+
+
+def ln_subset_evecs(distmat: MatrixLike, c0: float, qmax: int) -> MatrixLike:
+    """Compute subset eigenvectors for the large-n approximation branch."""
+    distmat = np.asarray(distmat, dtype=float)
+    sig_d = demeanmat(np.exp(-c0 * distmat))
+    n = sig_d.shape[0]
+
+    if qmax < n - 1:
+        evals, vectors = eigsh(sig_d, k=qmax, which="LM")
+        order = np.argsort(np.abs(evals))[::-1]
+        return vectors[:, order]
+
+    evals, vectors = np.linalg.eigh(sig_d)
+    order = np.argsort(evals)[::-1]
+    return vectors[:, order[:qmax]]
+
+
+def lnset_wc0(
+    s: MatrixLike,
+    avc0: float,
+    qmax: int,
+    minavc: float,
+    latlong: bool,
+    capN: int = 20,
+    m: int = 1000,
+    random_t: int = 1,
+) -> tuple[MatrixLike, float, float, int]:
+    """Approximate the projection basis and kernel scales for large n."""
+    s = np.asarray(s, dtype=float)
+    if s.ndim == 1:
+        s = s.reshape(-1, 1)
+
+    n = s.shape[0]
+    m = min(m, n)
+    block_len = m * (m - 1) // 2
+    ms: list[tuple[np.ndarray, np.ndarray]] = []
+    distvec = np.empty(capN * block_len, dtype=float)
+
+    r = s.copy()
+    for i in range(capN):
+        r, random_t = jumble_s(r, m, random_t)
+        subset = r[:m, :]
+        distmat = get_distmat(subset, latlong)
+        ms.append((subset, distmat))
+        start = i * block_len
+        stop = (i + 1) * block_len
+        distvec[start:stop] = lvech(distmat)
+
+    c0 = get_c0_from_avc(distvec, avc0)
+    cmax = get_c0_from_avc(distvec, minavc)
+
+    wall = np.zeros((n, capN * qmax), dtype=float)
+    for i, (subset, distmat) in enumerate(ms):
+        w0 = ln_subset_evecs(distmat, c0, qmax)
+        wx = np.zeros((n, qmax), dtype=float)
+        for j in range(m):
+            # this is the same nystrom-style extension used in the r/stata branch.
+            v = np.exp(-c0 * np.sqrt(np.sum((s - subset[j, :]) ** 2, axis=1)))
+            wx = wx + np.outer(v, w0[j, :])
+        wx = wx - np.mean(wx, axis=0, keepdims=True)
+        norms = np.sqrt(np.sum(wx**2, axis=0))
+        norms[~np.isfinite(norms) | (norms == 0)] = 1.0
+        wx = wx / norms
+        for j in range(qmax):
+            wall[:, j * capN + i] = wx[:, j]
+
+    w = np.zeros((n, qmax), dtype=float)
+    for i in range(qmax):
+        wx = wall[:, : capN * (i + 1)]
+        evals, evecs = np.linalg.eigh(wx.T @ wx)
+        evec = evecs[:, np.argmax(evals)]
+        w[:, i] = wx @ evec
+        w[:, i] = w[:, i] / math.sqrt(np.sum(w[:, i] ** 2))
+        wall = wall - np.outer(w[:, i], w[:, i] @ wall)
+
+    w = np.column_stack((np.full(n, 1 / math.sqrt(n)), w))
+    return w, c0, cmax, random_t
+
+
+def raninds(n: int, capM: int, random_t: int) -> tuple[ArrayLike, int]:
+    """Generate distinct linked random indices for sampled distance pairs."""
+    v = np.empty(capM + 1, dtype=int)
+    _, random_t = next_u(random_t)
+    j = int((random_t * n) // UINT32_MOD)
+
+    for i in range(capM + 1):
+        v[i] = j
+        _, random_t = next_u(random_t)
+        j = (j + 1 + int((random_t * (n - 1)) // UINT32_MOD)) % n
+
+    return v, random_t
+
+
+def lnget_oms(
+    s: MatrixLike,
+    c0: float,
+    cmax: float,
+    w: MatrixLike,
+    cgridfac: float,
+    capM: int = 1000000,
+    random_t: int = 1,
+    latlong: bool = False,
+) -> tuple[list[MatrixLike], int]:
+    """Approximate omega matrices for the large-n branch."""
+    s = np.asarray(s, dtype=float)
+    w = np.asarray(w, dtype=float)
+    if s.ndim == 1:
+        s = s.reshape(-1, 1)
+
+    nc = get_nc(c0, cmax, cgridfac)
+    oms: list[MatrixLike] = [np.empty((0, 0)) for _ in range(nc)]
+
+    n = s.shape[0]
+    inds, random_t = raninds(n, capM, random_t)
+    dist = get_distvec(s[inds[:capM], :], s[inds[1 : capM + 1], :], latlong)
+    w1 = w[inds[:capM], :]
+    w2 = w[inds[1 : capM + 1], :]
+
+    c = c0
+    for i in range(nc):
+        cd = np.exp(-c * dist)
+        oms[i] = np.eye(w.shape[1]) + 0.5 * (n * (n - 1) / capM) * (
+            w1.T @ (w2 * cd[:, None]) + w2.T @ (w1 * cd[:, None])
+        )
+        c = c * cgridfac
+
+    return oms, random_t
+
+
+def validate_large_n_seed(seed: object) -> int:
+    """Validate the seed used by the large-n approximation branch."""
+    if (
+        isinstance(seed, bool)
+        or not isinstance(seed, (int, np.integer))
+        or int(seed) < 0
+        or int(seed) >= UINT32_MOD
+    ):
+        raise ValueError(
+            "`large_n_seed` must be a single integer-valued number in [0, 2^32)."
+        )
+    return int(seed)
+
+
+def validate_scpc_method(method: object) -> str:
+    """Validate the requested SCPC spatial method."""
+    methods = {"auto", "exact", "approx"}
+    if not isinstance(method, str) or not method or method not in methods:
+        raise ValueError('`method` must be one of "auto", "exact", or "approx".')
+    return method
 
 
 def get_c0_from_avc(dist: ArrayLike, avc0: float) -> float:
@@ -316,27 +558,35 @@ def get_oms(
     return oms
 
 
-def set_oms_wfin(distmat: MatrixLike, avc0: float) -> SpatialSetup:
-    """Build the unconditional spatial setup from distances and an AVC bound.
+def set_oms_wfin(
+    coords: MatrixLike,
+    avc0: float,
+    latlong: bool,
+    method: str = "auto",
+    large_n_seed: int = 1,
+) -> SpatialSetup:
+    """Build the unconditional spatial setup from coordinates and an AVC bound.
 
-    This helper is the spatial engine in one place. It converts the user-level
-    average correlation bound into kernel scales, candidate projections, omega
-    matrices, and finally the projection basis that `scpc()` uses for
-    inference.
+    This helper now chooses between the exact and approximate spatial setup
+    branches and returns the metadata the later conditional step needs.
 
     Args:
-        distmat: Pairwise distance matrix.
+        coords: Observation coordinates.
         avc0: Target average pairwise correlation bound.
+        latlong: Whether to treat coordinates as longitude/latitude.
+        method: Requested spatial method.
+        large_n_seed: Seed for the large-n approximation branch.
 
     Returns:
         The complete spatial setup used by the main inference routine.
     """
-    distmat = np.asarray(distmat, dtype=float)
-    n = distmat.shape[0]
-    distv = lvech(distmat)
+    coords = np.asarray(coords, dtype=float)
+    n = coords.shape[0]
 
-    cgridfac = 1.2
-    minavc = 0.00001
+    if method == "auto":
+        method_actual = "exact" if n < LARGE_N_THRESHOLD else "approx"
+    else:
+        method_actual = method
 
     if avc0 >= 0.05:
         qmax = 10
@@ -347,18 +597,64 @@ def set_oms_wfin(distmat: MatrixLike, avc0: float) -> SpatialSetup:
     else:
         qmax = 120
 
-    c0 = get_c0_from_avc(distv, avc0)
-    cmax = get_c0_from_avc(distv, minavc)
+    distmat: MatrixLike | None = None
+    coords_use = coords
+    perm = np.arange(n, dtype=int)
+    random_t: int | None = None
 
     while True:
-        # grow the candidate projection dimension until the selected q stops
-        # landing on the upper boundary.
         qmax = min(qmax, n - 1)
-        w = get_w(distmat, c0, qmax)
-        oms = get_oms(distmat, c0, cmax, w, cgridfac)
+
+        if method_actual == "exact":
+            distmat = get_distmat(coords, latlong)
+            distv = lvech(distmat)
+            c0 = get_c0_from_avc(distv, avc0)
+            cmax = get_c0_from_avc(distv, MINAVC)
+            w = get_w(distmat, c0, qmax)
+            oms = get_oms(distmat, c0, cmax, w, CGRIDFAC)
+            coords_use = coords
+            perm = np.arange(n, dtype=int)
+            random_t = None
+        else:
+            random_t = large_n_seed
+            coords_use, perm = normalize_s(coords, latlong)
+            w, c0, cmax, random_t = lnset_wc0(
+                coords_use,
+                avc0,
+                qmax,
+                MINAVC,
+                latlong,
+                capN=LARGE_N_CAPN,
+                m=LARGE_N_M,
+                random_t=random_t,
+            )
+            oms, random_t = lnget_oms(
+                coords_use,
+                c0,
+                cmax,
+                w,
+                CGRIDFAC,
+                capM=LARGE_N_CAPM,
+                random_t=random_t,
+                latlong=latlong,
+            )
+            distmat = None
+
         wfin, cvfin, q = set_final_w(oms, w, qmax)
         if q < qmax or qmax == n - 1:
             break
         qmax = round(qmax + qmax / 2)
 
-    return SpatialSetup(wfin=wfin, cvfin=cvfin, omsfin=oms, c0=c0, cmax=cmax)
+    return SpatialSetup(
+        wfin=wfin,
+        cvfin=cvfin,
+        omsfin=oms,
+        c0=c0,
+        cmax=cmax,
+        coords=coords_use,
+        perm=perm,
+        distmat=distmat,
+        method=method_actual,
+        large_n=method_actual == "approx",
+        random_state=random_t,
+    )

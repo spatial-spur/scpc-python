@@ -184,7 +184,11 @@ def orthogonalize_w_cluster(
 
     nclust = w.shape[0]
     ncol_w = w.shape[1]
-    _, cl_idx = np.unique(cl_vec, return_inverse=True)
+    # this lets the large-n branch pass in its permuted cluster coding directly.
+    if np.issubdtype(cl_vec.dtype, np.integer):
+        cl_idx = cl_vec.astype(int, copy=False)
+    else:
+        _, cl_idx = np.unique(cl_vec, return_inverse=True)
 
     # normalize the influence direction within each cluster before projection
     xj_sq_sum = np.bincount(cl_idx, weights=xj_indiv**2, minlength=nclust)

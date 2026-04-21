@@ -36,6 +36,37 @@ def test_orthogonalize_w_cluster_leaves_the_simple_cluster_basis_unchanged() -> 
     )
 
 
+def test_orthogonalize_w_cluster_accepts_preencoded_cluster_indices() -> None:
+    w = np.array(
+        [
+            [1.0 / math.sqrt(3.0), 1.0 / math.sqrt(2.0)],
+            [1.0 / math.sqrt(3.0), 0.0],
+            [1.0 / math.sqrt(3.0), -1.0 / math.sqrt(2.0)],
+        ]
+    )
+    cl_labels = np.array(["c", "a", "c", "b"])
+    cl_idx = np.array([2, 0, 2, 1])
+    xj_indiv = np.array([1.0, 2.0, 1.5, 0.5])
+    model_mat_indiv = np.array([[1.0], [0.0], [1.0], [0.0]])
+
+    from_labels = orthogonalize_w_cluster(
+        w,
+        cl_labels,
+        xj_indiv,
+        model_mat_indiv,
+        include_intercept=False,
+    )
+    from_idx = orthogonalize_w_cluster(
+        w,
+        cl_idx,
+        xj_indiv,
+        model_mat_indiv,
+        include_intercept=False,
+    )
+
+    npt.assert_allclose(from_idx, from_labels, atol=1e-12, rtol=0.0)
+
+
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_orthogonalize_w_cluster() -> None:
     w = [

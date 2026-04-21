@@ -34,7 +34,7 @@ class ConditionalProjectionSetup:
 
 @dataclass(slots=True)
 class SpatialSetup:
-    """Spatial reference objects built from the distance matrix."""
+    """Spatial objects used by the inference step."""
 
     wfin: MatrixLike
     """Final spatial projection matrix used for inference."""
@@ -46,6 +46,18 @@ class SpatialSetup:
     """Kernel scale implied by the chosen correlation bound."""
     cmax: float
     """Largest kernel scale used in the spatial grid search."""
+    coords: MatrixLike
+    """Coordinates actually used by the spatial setup."""
+    perm: ArrayLike
+    """Permutation used to align the spatial branch with the data."""
+    distmat: MatrixLike | None
+    """Exact distance matrix, or `None` in the approximate branch."""
+    method: str
+    """Spatial method actually used: `exact` or `approx`."""
+    large_n: bool
+    """Whether the approximate large-n branch was used."""
+    random_state: int | None
+    """Random state carried forward by the approximate branch."""
 
 
 @dataclass(slots=True)
@@ -66,6 +78,10 @@ class SCPCResult:
     """Default 5 percent critical value used for intervals."""
     q: int
     """Number of spatial components kept in the final projection."""
+    method: str = "exact"
+    """Spatial method actually used: `exact` or `approx`."""
+    large_n_seed: int = 1
+    """Seed used by the large-n approximation branch."""
     call: str | None = None
     """Text version of the original call, when available."""
 
