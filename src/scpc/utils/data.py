@@ -27,27 +27,25 @@ def get_obs_index(model: ModelLike, data: DataFrameLike) -> ArrayLike:
         data: Original data passed to the model.
 
     Returns:
-        Integer indices locating the model observations in `data`.
+        One-based row positions locating the model observations in `data`.
 
     Raises:
-        ValueError: Raised later if the model rows cannot be mapped back to
-            the provided data.
+        ValueError: If the model rows cannot be mapped back to the provided
+            data.
     """
     row_labels = np.asarray(model.model.data.row_labels)
 
-    try:
-        obs_index = row_labels.astype(int)
-    except (TypeError, ValueError):
-        obs_index = data.index.get_indexer(row_labels) + 1
-        if np.any(obs_index == 0):
-            raise ValueError("Could not map model frame rows back to `data`.")
-
-    if np.any((obs_index < 1) | (obs_index > len(data))):
+    if not data.index.is_unique:
         raise ValueError(
-            "Model observation indices are outside the row range of `data`."
+            "`data.index` must be unique to map model rows back to `data`."
         )
 
-    return obs_index
+    # statsmodels gives us row labels, so we map them back to row positions here.
+    obs_index = data.index.get_indexer(row_labels)
+    if np.any(obs_index < 0):
+        raise ValueError("Could not map model frame rows back to `data`.")
+
+    return obs_index + 1
 
 
 def get_scpc_model_matrix(model: ModelLike) -> MatrixLike:

@@ -69,6 +69,93 @@ def test_scpc_auto_uses_the_exact_branch_for_small_problems() -> None:
     assert result.method == "exact"
 
 
+def test_scpc_handles_filtered_dataframe_without_resetting_index() -> None:
+    base = pd.DataFrame(
+        {
+            "y": [1.0, 1.8, 2.9, 3.7, 5.1, 6.0],
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            "coord_x": [0.0, 1.0, 0.5, 1.5, 2.0, 2.5],
+            "coord_y": [0.0, 0.0, 1.0, 1.0, 1.5, 2.0],
+        },
+        index=[1, 2, 4, 7, 8, 11],
+    )
+    filtered = base.loc[[1, 4, 7, 11]].copy()
+    filtered_model = smf.ols("y ~ x", data=filtered).fit()
+
+    reset = filtered.reset_index(drop=True)
+    reset.index += 1
+    reset_model = smf.ols("y ~ x", data=reset).fit()
+
+    filtered_result = scpc(
+        filtered_model,
+        filtered,
+        coords_euclidean=("coord_x", "coord_y"),
+        avc=0.1,
+        method="exact",
+        uncond=True,
+        cvs=False,
+    )
+    reset_result = scpc(
+        reset_model,
+        reset,
+        coords_euclidean=("coord_x", "coord_y"),
+        avc=0.1,
+        method="exact",
+        uncond=True,
+        cvs=False,
+    )
+
+    npt.assert_allclose(
+        filtered_result.scpcstats, reset_result.scpcstats, atol=ATOL, rtol=RTOL
+    )
+    assert filtered_result.c0 == pytest.approx(reset_result.c0, abs=ATOL, rel=RTOL)
+    assert filtered_result.cv == pytest.approx(reset_result.cv, abs=ATOL, rel=RTOL)
+    assert filtered_result.q == reset_result.q
+
+
+def test_scpc_handles_permuted_integer_index() -> None:
+    base = pd.DataFrame(
+        {
+            "y": [2.0, 1.5, 3.1, 4.2, 5.4],
+            "x": [1.0, 0.0, 2.0, 3.0, 4.0],
+            "coord_x": [10.0, 20.0, 30.0, 40.0, 50.0],
+            "coord_y": [0.0, 1.0, 0.5, 1.5, 2.0],
+        },
+        index=[3, 1, 5, 2, 4],
+    )
+    permuted_model = smf.ols("y ~ x", data=base).fit()
+
+    reset = base.reset_index(drop=True)
+    reset.index += 1
+    reset_model = smf.ols("y ~ x", data=reset).fit()
+
+    permuted_result = scpc(
+        permuted_model,
+        base,
+        coords_euclidean=("coord_x", "coord_y"),
+        avc=0.1,
+        method="exact",
+        uncond=True,
+        cvs=False,
+    )
+    reset_result = scpc(
+        reset_model,
+        reset,
+        coords_euclidean=("coord_x", "coord_y"),
+        avc=0.1,
+        method="exact",
+        uncond=True,
+        cvs=False,
+    )
+
+    npt.assert_allclose(
+        permuted_result.scpcstats, reset_result.scpcstats, atol=ATOL, rtol=RTOL
+    )
+    assert permuted_result.c0 == pytest.approx(reset_result.c0, abs=ATOL, rel=RTOL)
+    assert permuted_result.cv == pytest.approx(reset_result.cv, abs=ATOL, rel=RTOL)
+    assert permuted_result.q == reset_result.q
+
+
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_scpc() -> None:
     payload = {

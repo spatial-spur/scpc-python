@@ -9,7 +9,7 @@ from scpc.utils.data import get_obs_index
 from tests.utils import R, execute_r_code
 
 
-def test_get_obs_index_returns_the_surviving_data_index_labels() -> None:
+def test_get_obs_index_returns_the_surviving_row_positions() -> None:
     data = pd.DataFrame(
         {
             "y": [1.0, 2.0, 3.0, 4.0],
@@ -20,6 +20,46 @@ def test_get_obs_index_returns_the_surviving_data_index_labels() -> None:
     model = smf.ols("y ~ x", data=data).fit()
 
     assert list(get_obs_index(model, data)) == [1, 2, 4]
+
+
+def test_get_obs_index_maps_gappy_integer_index_to_row_positions() -> None:
+    data = pd.DataFrame(
+        {
+            "y": [1.0, 2.0, 3.0],
+            "x": [0.0, 1.0, 2.0],
+        },
+        index=[1, 4, 7],
+    )
+    model = smf.ols("y ~ x", data=data).fit()
+
+    assert list(get_obs_index(model, data)) == [1, 2, 3]
+
+
+def test_get_obs_index_preserves_model_order_for_permuted_integer_index() -> None:
+    data = pd.DataFrame(
+        {
+            "y": [1.0, 2.0, 3.0],
+            "x": [0.0, 1.0, 2.0],
+        },
+        index=[2, 1, 3],
+    )
+    model = smf.ols("y ~ x", data=data).fit()
+
+    assert list(get_obs_index(model, data)) == [1, 2, 3]
+
+
+def test_get_obs_index_rejects_duplicate_data_index() -> None:
+    data = pd.DataFrame(
+        {
+            "y": [1.0, 2.0, 3.0],
+            "x": [0.0, 1.0, 2.0],
+        },
+        index=[1, 1, 2],
+    )
+    model = smf.ols("y ~ x", data=data).fit()
+
+    with pytest.raises(ValueError, match=r"`data\.index` must be unique"):
+        get_obs_index(model, data)
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")

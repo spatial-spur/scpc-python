@@ -31,6 +31,48 @@ def test_resolve_coords_input_selects_the_euclidean_coordinate_columns() -> None
     assert result.latlong is False
 
 
+def test_resolve_coords_input_uses_mapped_positions_for_gappy_integer_index() -> None:
+    data = pd.DataFrame(
+        {
+            "coord_x": [10.0, 11.0, 12.0],
+            "coord_y": [20.0, 21.0, 22.0],
+        },
+        index=[1, 4, 7],
+    )
+    obs_index = np.array([1, 2, 3])
+
+    result = resolve_coords_input(data, obs_index, None, None, ("coord_x", "coord_y"))
+
+    npt.assert_allclose(
+        result.coords,
+        np.array([[10.0, 20.0], [11.0, 21.0], [12.0, 22.0]]),
+        atol=1e-12,
+        rtol=0.0,
+    )
+    assert result.latlong is False
+
+
+def test_resolve_coords_input_preserves_order_for_permuted_integer_index() -> None:
+    data = pd.DataFrame(
+        {
+            "coord_x": [10.0, 20.0, 30.0],
+            "coord_y": [40.0, 50.0, 60.0],
+        },
+        index=[2, 1, 3],
+    )
+    obs_index = np.array([1, 2, 3])
+
+    result = resolve_coords_input(data, obs_index, None, None, ("coord_x", "coord_y"))
+
+    npt.assert_allclose(
+        result.coords,
+        np.array([[10.0, 40.0], [20.0, 50.0], [30.0, 60.0]]),
+        atol=1e-12,
+        rtol=0.0,
+    )
+    assert result.latlong is False
+
+
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_resolve_coords_input() -> None:
     payload = {
