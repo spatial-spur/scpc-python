@@ -9,11 +9,20 @@ import numpy as np
 from .types import DataFrameLike, ModelLike, SCPCResult
 from .utils.data import (
     get_conditional_projection_setup,
+    get_fixest_bread_inv,
+    get_fixest_score_matrix,
     get_obs_index,
     get_scpc_model_matrix,
+    is_pyfixest_model,
+    is_pyfixest_multi,
     resolve_coords_input,
 )
-from .utils.matrix import orthogonalize_w, orthogonalize_w_cluster
+from .utils.matrix import (
+    orthogonalize_w,
+    orthogonalize_w_cluster,
+    orthogonalize_w_cluster_iv,
+    orthogonalize_w_iv,
+)
 from .utils.spatial import (
     get_cv,
     get_oms,
@@ -72,9 +81,23 @@ def scpc(
     method = validate_scpc_method(method)
     large_n_seed = validate_large_n_seed(large_n_seed)
 
-    resid = np.asarray(model.resid, dtype=float)
+    if is_pyfixest_multi(model):
+        raise ValueError(
+            "`scpc()` only accepts a single fitted pyfixest model, not "
+            "FixestMulti."
+        )
+
     model_mat = get_scpc_model_matrix(model)
-    s = np.asarray(model.model.exog, dtype=float) * resid[:, None]
+    if is_pyfixest_model(model):
+        s = np.asarray(get_fixest_score_matrix(model), dtype=float)
+        bread_inv = np.asarray(get_fixest_bread_inv(model), dtype=float)
+        coef = np.asarray(getattr(model, "_beta_hat", None), dtype=float).reshape(-1)
+    else:
+        resid = np.asarray(model.resid, dtype=float)
+        s = np.asarray(model.model.exog, dtype=float) * resid[:, None]
+        bread_inv = np.asarray(model.normalized_cov_params, dtype=float)
+        coef = np.asarray(model.params, dtype=float)
+
     n = s.shape[0]
     p = s.shape[1]
     neff = n
@@ -88,6 +111,8 @@ def scpc(
     model_mat_cond = np.asarray(cond_setup.model_mat, dtype=float)
     cond_include_intercept = cond_setup.include_intercept
     cond_fixef_id = cond_setup.fixef_id
+    cond_is_iv = cond_setup.is_iv
+    cond_residualize = cond_setup.residualize
 
     if model_mat_cond.shape != (n, p):
         raise ValueError(
@@ -163,8 +188,6 @@ def scpc(
     q = wfin.shape[1] - 1
     large_n_random_state = spc.random_state
 
-    bread_inv = np.asarray(model.normalized_cov_params, dtype=float)
-
     k_use = p if ncoef is None else min(ncoef, p)
     out = np.full((k_use, 6), np.nan)
     levs = np.array([0.32, 0.10, 0.05, 0.01], dtype=float)
@@ -174,8 +197,6 @@ def scpc(
         if cvs
         else None
     )
-
-    coef = np.asarray(model.params, dtype=float)
 
     for j in range(k_use):
         wj = neff * (bread_inv[j, :] @ s.T) + coef[j]
@@ -211,25 +232,41 @@ def scpc(
                     )
 
                 xj_indiv = neff * (bread_inv[j, :] @ model_mat_cond.T)
-                wx = orthogonalize_w_cluster(
-                    wfin,
-                    cl_idx_scpc,
-                    xj_indiv,
-                    model_mat_cond,
-                    include_intercept=cond_include_intercept,
-                )
+                if cond_is_iv:
+                    wx = orthogonalize_w_cluster_iv(
+                        wfin,
+                        cl_idx_scpc,
+                        xj_indiv,
+                        residualize=cond_residualize,
+                    )
+                else:
+                    wx = orthogonalize_w_cluster(
+                        wfin,
+                        cl_idx_scpc,
+                        xj_indiv,
+                        model_mat_cond,
+                        include_intercept=cond_include_intercept,
+                    )
             else:
                 xj = neff * (bread_inv[j, :] @ model_mat_cond.T)
                 xj = xj[perm]
                 xjs = np.sign(xj)
-                wx = orthogonalize_w(
-                    wfin,
-                    xj,
-                    xjs,
-                    model_mat_cond[perm, :],
-                    include_intercept=cond_include_intercept,
-                    fixef_id=cond_fixef_id,
-                )
+                if cond_is_iv:
+                    wx = orthogonalize_w_iv(
+                        wfin,
+                        xj,
+                        xjs,
+                        residualize=cond_residualize,
+                    )
+                else:
+                    wx = orthogonalize_w(
+                        wfin,
+                        xj,
+                        xjs,
+                        model_mat_cond[perm, :],
+                        include_intercept=cond_include_intercept,
+                        fixef_id=cond_fixef_id,
+                    )
 
             if spc.large_n:
                 # this reuses the sampled omega construction from the large-n setup.

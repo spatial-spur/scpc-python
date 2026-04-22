@@ -185,8 +185,7 @@ def test_python_r_parity_scpc() -> None:
         out <- scpc(
           fit,
           data = d,
-          # TODO: rename this to `coords_euclidean` once scpcR adopts the planned API.
-          coord_euclidean = unlist(payload$coords_euclidean),
+          coords_euclidean = unlist(payload$coords_euclidean),
           avc = payload$avc,
           method = payload$method,
           large_n_seed = payload$large_n_seed,
@@ -316,7 +315,7 @@ def test_python_r_parity_scpc_approx() -> None:
         out <- scpc(
           fit,
           data = d,
-          coord_euclidean = unlist(payload$coords_euclidean),
+          coords_euclidean = unlist(payload$coords_euclidean),
           avc = payload$avc,
           method = payload$method,
           large_n_seed = payload$large_n_seed,
@@ -387,7 +386,7 @@ def test_python_r_parity_scpc_clustered_approx() -> None:
         out <- scpc(
           fit,
           data = d,
-          coord_euclidean = unlist(payload$coords_euclidean),
+          coords_euclidean = unlist(payload$coords_euclidean),
           cluster = payload$cluster,
           avc = payload$avc,
           method = payload$method,

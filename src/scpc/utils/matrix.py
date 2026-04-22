@@ -104,6 +104,199 @@ def get_tau(y: ArrayLike, w: MatrixLike) -> float:
     )
 
 
+def coerce_numeric_matrix(a: MatrixLike, arg: str) -> tuple[np.ndarray, bool]:
+    """Convert a vector or matrix input into a numeric 2d array."""
+    vec_input = np.ndim(a) == 1
+    a = np.asarray(a, dtype=float)
+    if a.ndim == 1:
+        a = a[:, None]
+    if a.shape[0] == 0:
+        raise ValueError(f"{arg} must have at least one row.")
+    if not np.isfinite(a).all():
+        raise ValueError(f"{arg} contains non-finite values.")
+    return a, vec_input
+
+
+def restore_residualizer_shape(a: np.ndarray, vec_input: bool) -> np.ndarray:
+    """Restore vector inputs to a one-dimensional result."""
+    return a[:, 0] if vec_input else a
+
+
+def make_iv_residualizer(
+    X: MatrixLike,
+    Z: MatrixLike,
+    tol: float = 1e-10,
+    demean=None,
+):
+    """Build the IV residualizer used by conditional SCPC.
+
+    This mirrors `scpcR:::.make_iv_residualizer()`. It fills the same role as
+    the direct QR-based 2SLS residualization step in the R code, but it takes
+    already-aligned numeric matrices from pyfixest instead of formula-driven
+    fixest objects.
+
+    Args:
+        X: Second-stage regressor matrix.
+        Z: Instrument matrix.
+        tol: Rank tolerance used in the linear solves.
+        demean: Optional callable that applies the same fixed-effect demeaning
+            used by the fitted model to a vector or matrix.
+
+    Returns:
+        A callable that residualizes a vector or matrix against the IV
+        nuisance space.
+
+    Raises:
+        ValueError: If the IV design is malformed or rank deficient.
+    """
+    X, _ = coerce_numeric_matrix(X, "IV residualizer X")
+    Z, _ = coerce_numeric_matrix(Z, "IV residualizer Z")
+    if X.shape[0] != Z.shape[0]:
+        raise ValueError("IV residualizer requires X and Z to have the same number of rows.")
+
+    if demean is not None:
+        # scpcr demeans the raw iv design inside the residualizer when fixed
+        # effects are present, so we do the same here.
+        X = np.asarray(demean(X, context="IV residualizer X"), dtype=float)
+        Z = np.asarray(demean(Z, context="IV residualizer Z"), dtype=float)
+
+    qz, _ = np.linalg.qr(Z, mode="reduced")
+    pzx = qz @ (qz.T @ X)
+    A = X.T @ pzx
+    if np.linalg.matrix_rank(A, tol=tol) < A.shape[1]:
+        raise ValueError("IV residualizer is rank deficient: X'P_ZX is not full rank.")
+
+    def residualize(Y: MatrixLike) -> np.ndarray:
+        Y, vec_input = coerce_numeric_matrix(Y, "IV residualizer Y")
+        if Y.shape[0] != X.shape[0]:
+            raise ValueError("IV residualizer received Y with an incompatible row count.")
+
+        if demean is not None:
+            Y = np.asarray(demean(Y, context="IV residualizer Y"), dtype=float)
+
+        # project y into the instrument space before taking out the x part.
+        pzy = qz @ (qz.T @ Y)
+        coef = np.linalg.solve(A, X.T @ pzy)
+        if not np.isfinite(coef).all():
+            raise ValueError("IV residualizer produced non-finite auxiliary coefficients.")
+
+        return restore_residualizer_shape(Y - X @ coef, vec_input)
+
+    return residualize
+
+
+def orthogonalize_w_iv(
+    wfin: MatrixLike,
+    xj: ArrayLike,
+    xjs: ArrayLike,
+    residualize,
+) -> MatrixLike:
+    """Build the conditional IV projection matrix for non-clustered SCPC.
+
+    This mirrors `scpcR:::.orthogonalize_W_iv()`, which applies the IV
+    residualizer to the non-constant spatial directions before scaling them
+    by the coefficient-specific influence direction.
+
+    Args:
+        wfin: Spatial projection matrix.
+        xj: Coefficient-specific influence direction.
+        xjs: Normalized sign or scaling vector for `xj`.
+        residualize: Residualizer returned by `make_iv_residualizer()`.
+
+    Returns:
+        The orthogonalized conditional IV projection matrix.
+    """
+    wfin = np.asarray(wfin, dtype=float)
+    xj = np.asarray(xj, dtype=float)
+    xjs = np.asarray(xjs, dtype=float)
+
+    if len(xj) != wfin.shape[0]:
+        raise ValueError("Conditional IV projection received xj with an incompatible length.")
+    if len(xjs) != wfin.shape[0]:
+        raise ValueError("Conditional IV projection received xjs with an incompatible length.")
+    if not np.isfinite(xj).all() or not np.isfinite(xjs).all():
+        raise ValueError("Conditional IV projection received non-finite xj or xjs values.")
+
+    wx = wfin.copy()
+    wx[:, 0] = wfin[:, 0] * xj * xjs
+
+    if wfin.shape[1] > 1:
+        y = wfin[:, 1:] * xjs[:, None]
+        r = np.asarray(residualize(y), dtype=float)
+        wx[:, 1:] = r * xj[:, None]
+
+    if not np.isfinite(wx).all():
+        raise ValueError("Conditional IV projection produced non-finite W values.")
+
+    return wx
+
+
+def orthogonalize_w_cluster_iv(
+    wfin: MatrixLike,
+    cl_vec: ArrayLike,
+    xj_indiv: ArrayLike,
+    residualize,
+) -> MatrixLike:
+    """Build the conditional IV projection matrix for clustered SCPC.
+
+    This mirrors `scpcR:::.orthogonalize_W_cluster_iv()`. It normalizes the
+    individual influence direction within clusters, applies the IV
+    residualizer at the individual level, and then aggregates back to the
+    cluster level.
+
+    Args:
+        wfin: Cluster-level spatial projection matrix.
+        cl_vec: Cluster membership for each individual observation.
+        xj_indiv: Individual-level influence direction.
+        residualize: Residualizer returned by `make_iv_residualizer()`.
+
+    Returns:
+        The cluster-level conditional IV projection matrix.
+    """
+    wfin = np.asarray(wfin, dtype=float)
+    cl_vec = np.asarray(cl_vec)
+    xj_indiv = np.asarray(xj_indiv, dtype=float)
+
+    nclust = wfin.shape[0]
+    ncol_w = wfin.shape[1]
+    if np.issubdtype(cl_vec.dtype, np.integer):
+        cl_idx = cl_vec.astype(int, copy=False)
+    else:
+        _, cl_idx = np.unique(cl_vec, return_inverse=True)
+
+    if len(xj_indiv) != len(cl_vec):
+        raise ValueError("Clustered IV projection received xj_indiv with an incompatible length.")
+    if not np.isfinite(xj_indiv).all():
+        raise ValueError("Clustered IV projection received non-finite xj_indiv values.")
+
+    xj_sq_sum = np.bincount(cl_idx, weights=xj_indiv**2, minlength=nclust)
+    xjs_indiv = xj_indiv / np.sqrt(xj_sq_sum[cl_idx])
+    xjs_indiv[~np.isfinite(xjs_indiv)] = 0
+
+    w_indiv = wfin[cl_idx, :]
+    wx = np.zeros((nclust, ncol_w), dtype=float)
+    wx[:, 0] = np.bincount(
+        cl_idx,
+        weights=w_indiv[:, 0] * xjs_indiv * xj_indiv,
+        minlength=nclust,
+    )
+
+    if ncol_w > 1:
+        y = w_indiv[:, 1:] * xjs_indiv[:, None]
+        r = np.asarray(residualize(y), dtype=float)
+        wx[:, 1:] = np.column_stack(
+            [
+                np.bincount(cl_idx, weights=r[:, col] * xj_indiv, minlength=nclust)
+                for col in range(r.shape[1])
+            ]
+        )
+
+    if not np.isfinite(wx).all():
+        raise ValueError("Clustered conditional IV projection produced non-finite W values.")
+
+    return wx
+
+
 def orthogonalize_w(
     w: MatrixLike,
     xj: ArrayLike,

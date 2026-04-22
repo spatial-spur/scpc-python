@@ -30,6 +30,10 @@ class ConditionalProjectionSetup:
     """Whether the adjustment should include an intercept term."""
     fixef_id: ArrayLike | None
     """Fixed-effect identifiers used for demeaning, if any."""
+    residualize: Any | None = None
+    """Residualizer used by the conditional IV branch, if any."""
+    is_iv: bool = False
+    """Whether the conditional adjustment should use the IV branch."""
 
 
 @dataclass(slots=True)
