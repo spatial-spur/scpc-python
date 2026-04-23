@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,17 @@ DataFrameLike: TypeAlias = Any
 SCPC_STATS_COLUMNS = ["Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %"]
 SCPC_CV_COLUMNS = ["32%", "10%", "5%", "1%"]
 SCPC_CV_LEVELS = {0.68: 0, 0.90: 1, 0.95: 2, 0.99: 3}
+
+
+class FixestSpec(TypedDict):
+    """Stored pyfixest IV design objects aligned to coefficient order."""
+
+    X: MatrixLike
+    Z: MatrixLike
+    model_mat: MatrixLike
+    coef_names: list[str]
+    fixef_id: ArrayLike | None
+    has_fixef: bool
 
 
 @dataclass(slots=True)

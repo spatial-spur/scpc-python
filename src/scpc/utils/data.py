@@ -8,6 +8,7 @@ from ..types import (
     ConditionalProjectionSetup,
     CoordinateData,
     DataFrameLike,
+    FixestSpec,
     MatrixLike,
     ModelLike,
 )
@@ -326,7 +327,7 @@ def has_fixest_fe(model: ModelLike) -> bool:
 
 def get_fixest_iv_design(
     model: ModelLike,
-) -> dict[str, MatrixLike | list[str] | None | bool]:
+) -> FixestSpec:
     """Extract the stored IV design objects from a pyfixest fit.
 
     This mirrors `scpcR:::.get_fixest_iv_design()`. In the R code that helper
