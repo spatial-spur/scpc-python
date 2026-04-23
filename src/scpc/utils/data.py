@@ -1,7 +1,5 @@
 from __future__ import annotations
-
 from collections.abc import Sequence
-
 import numpy as np
 import pandas as pd
 
@@ -29,6 +27,14 @@ def is_pyfixest_multi(model: ModelLike) -> bool:
 def get_pyfixest_coef_names(model: ModelLike) -> list[str]:
     """Return the stored pyfixest coefficient names as plain strings."""
     return [str(name) for name in getattr(model, "_coefnames", [])]
+
+
+def get_coef_names(model: ModelLike) -> list[str]:
+    """Return coefficient names in coefficient order."""
+    if is_pyfixest_model(model):
+        return get_pyfixest_coef_names(model)
+
+    return [str(name) for name in model.model.exog_names]
 
 
 def get_pyfixest_data(model: ModelLike) -> DataFrameLike:
