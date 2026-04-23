@@ -1,6 +1,6 @@
 [project]
 name = "scpc-python"
-version = "0.1.1"
+version = "0.1.2"
 description = "SCPC inference in Python"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -218,6 +218,7 @@ def test_scpc_matches_r_for_one_way_fe_iv_approx() -> None:
     assert result.method == "approx"
     assert result.large_n_seed == 17
 
+
 def test_scpc_matches_r_for_clustered_iv_approx() -> None:
     data = make_clustered_iv_data(2003)
     fit = pf.feols("y ~ w | x ~ z", data=data)
@@ -239,6 +240,7 @@ def test_scpc_matches_r_for_clustered_iv_approx() -> None:
     assert np.isfinite(result.scpccvs).all()
     assert result.method == "approx"
     assert result.large_n_seed == 17
+
 
 def test_scpc_matches_r_for_clustered_fe_iv_approx() -> None:
     data = make_clustered_fe_iv_data(2004)

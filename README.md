@@ -69,13 +69,20 @@ result = scpc(
     lat="lat",
     cvs=True,
 )
+
+print(result)
 ```
 
 `scpc()` returns an `SCPCResult` object:
 
+- `print(result)`: prints an R-like SCPC inference table
 - `result.scpcstats`: the main inference table with coefficient estimates,
   standard errors, t statistics, p values, and 95% interval endpoints
 - `result.scpccvs`: optional stored critical values at 32%, 10%, 5%, and 1%
+- `result.coef()`: returns named coefficient estimates in `scpc-python>=0.1.2`
+- `result.confint()`: returns named confidence intervals in `scpc-python>=0.1.2`
+- `result.summary()`: prints the main table plus confidence intervals in
+  `scpc-python>=0.1.2`
 - `result.avc`: the average pairwise correlation bound used in the analysis
 - `result.c0`: the kernel scale implied by `avc`
 - `result.cv`: the unconditional 5% critical value

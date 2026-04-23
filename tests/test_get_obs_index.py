@@ -136,7 +136,11 @@ def test_python_r_parity_get_obs_index() -> None:
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_get_obs_index_for_pyfixest() -> None:
     payload = {
-        "data": {"y": [1.0, 2.0, 3.0, 4.0], "x": [0.0, 1.0, None, 3.0], "z": [1.0, 0.0, 2.0, 1.0]},
+        "data": {
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "x": [0.0, 1.0, None, 3.0],
+            "z": [1.0, 0.0, 2.0, 1.0],
+        },
     }
     data = pd.DataFrame(payload["data"], index=["a", "b", "c", "d"])
     model = pf.feols("y ~ 1 | x ~ z", data=data)

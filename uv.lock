@@ -1537,7 +1537,7 @@ wheels = [
 
 [[package]]
 name = "scpc-python"
-version = "0.1.0b5"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },

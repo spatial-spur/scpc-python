@@ -51,7 +51,7 @@ out = scpc(
     lat="lat",
 )
 
-out.scpcstats
+print(out)
 ```
 
 - `fit` is the fitted model
@@ -61,9 +61,10 @@ out.scpcstats
 If your coordinates are Euclidean rather than geographic, use
 `coords_euclidean=[...]` instead of `lon` and `lat`.
 
-`out.scpcstats` contains the main SCPC inference table. If you call
-`scpc(..., cvs=True)`, additional critical values are stored in
-`out.scpccvs`.
+`print(out)` shows an R-like SCPC inference table. From
+`scpc-python>=0.1.2`, use `out.coef()`, `out.confint()`, and `out.summary()`
+for named access. The raw arrays remain available as `out.scpcstats` and, when
+`cvs=True`, `out.scpccvs`.
 
 If you need the diagnostic and transformation stage before inference, the
 easiest entry point is `spur-python`, which uses `scpc-python` internally for
@@ -85,11 +86,11 @@ result = spur(
 )
 ```
 
-The `scpc` stats in the result object can be accessed using:
+The nested SCPC results can be printed directly:
 
 ```python
-result.fits.levels.scpc.scpcstats
-result.fits.transformed.scpc.scpcstats
+print(result.fits.levels.scpc)
+print(result.fits.transformed.scpc)
 ```
 
 ## Next Step

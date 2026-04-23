@@ -91,10 +91,15 @@ def test_get_conditional_projection_setup_marks_pyfixest_iv_models() -> None:
     model_mat = np.asarray(model._X, dtype=float)
     design = get_fixest_iv_design(model)
 
-    setup = get_conditional_projection_setup(model, model_mat, n=model_mat.shape[0], uncond=False)
+    setup = get_conditional_projection_setup(
+        model, model_mat, n=model_mat.shape[0], uncond=False
+    )
 
     npt.assert_allclose(
-        setup.model_mat, np.asarray(design["model_mat"], dtype=float), atol=1e-12, rtol=0.0
+        setup.model_mat,
+        np.asarray(design["model_mat"], dtype=float),
+        atol=1e-12,
+        rtol=0.0,
     )
     assert setup.include_intercept is True
     assert setup.fixef_id is None
@@ -188,7 +193,9 @@ def test_get_conditional_projection_setup_uses_demeaned_pyfixest_fe_matrix() -> 
     model = pf.feols("y ~ x | fe", data=data)
     model_mat = np.asarray(model._X, dtype=float)
 
-    setup = get_conditional_projection_setup(model, model_mat, n=model_mat.shape[0], uncond=False)
+    setup = get_conditional_projection_setup(
+        model, model_mat, n=model_mat.shape[0], uncond=False
+    )
 
     npt.assert_allclose(setup.model_mat, model_mat, atol=1e-12, rtol=0.0)
     assert setup.include_intercept is False

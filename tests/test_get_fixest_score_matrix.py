@@ -23,7 +23,8 @@ def test_get_fixest_score_matrix_maps_iv_scores_into_coefficient_space() -> None
 
     npt.assert_allclose(
         np.asarray(model._scores, dtype=float),
-        np.asarray(model._Z, dtype=float) * np.asarray(model._u_hat, dtype=float)[:, None],
+        np.asarray(model._Z, dtype=float)
+        * np.asarray(model._u_hat, dtype=float)[:, None],
         atol=1e-12,
         rtol=0.0,
     )

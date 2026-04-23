@@ -43,6 +43,30 @@ def test_scpc_returns_a_result_with_the_expected_structure() -> None:
     assert result.w.shape[0] == 5
     assert result.method == "exact"
     assert result.large_n_seed == 7
+    assert result.coef_names == ["Intercept", "x"]
+
+
+def test_scpc_stores_only_reported_coef_names_when_ncoef_is_set() -> None:
+    data = pd.DataFrame(
+        {
+            "y": [1.0, 1.8, 2.9, 3.7, 5.1],
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0],
+            "coord_x": [0.0, 1.0, 0.5, 1.5, 2.0],
+            "coord_y": [0.0, 0.0, 1.0, 1.0, 1.5],
+        }
+    )
+    model = smf.ols("y ~ x", data=data).fit()
+
+    result = scpc(
+        model,
+        data,
+        coords_euclidean=("coord_x", "coord_y"),
+        ncoef=1,
+        uncond=True,
+    )
+
+    assert result.scpcstats.shape == (1, 6)
+    assert result.coef_names == ["Intercept"]
 
 
 def test_scpc_auto_uses_the_exact_branch_for_small_problems() -> None:

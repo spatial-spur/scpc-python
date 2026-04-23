@@ -152,7 +152,9 @@ def make_iv_residualizer(
     X, _ = coerce_numeric_matrix(X, "IV residualizer X")
     Z, _ = coerce_numeric_matrix(Z, "IV residualizer Z")
     if X.shape[0] != Z.shape[0]:
-        raise ValueError("IV residualizer requires X and Z to have the same number of rows.")
+        raise ValueError(
+            "IV residualizer requires X and Z to have the same number of rows."
+        )
 
     if demean is not None:
         # scpcr demeans the raw iv design inside the residualizer when fixed
@@ -169,7 +171,9 @@ def make_iv_residualizer(
     def residualize(Y: MatrixLike) -> np.ndarray:
         Y, vec_input = coerce_numeric_matrix(Y, "IV residualizer Y")
         if Y.shape[0] != X.shape[0]:
-            raise ValueError("IV residualizer received Y with an incompatible row count.")
+            raise ValueError(
+                "IV residualizer received Y with an incompatible row count."
+            )
 
         if demean is not None:
             Y = np.asarray(demean(Y, context="IV residualizer Y"), dtype=float)
@@ -178,7 +182,9 @@ def make_iv_residualizer(
         pzy = qz @ (qz.T @ Y)
         coef = np.linalg.solve(A, X.T @ pzy)
         if not np.isfinite(coef).all():
-            raise ValueError("IV residualizer produced non-finite auxiliary coefficients.")
+            raise ValueError(
+                "IV residualizer produced non-finite auxiliary coefficients."
+            )
 
         return restore_residualizer_shape(Y - X @ coef, vec_input)
 
@@ -211,11 +217,17 @@ def orthogonalize_w_iv(
     xjs = np.asarray(xjs, dtype=float)
 
     if len(xj) != wfin.shape[0]:
-        raise ValueError("Conditional IV projection received xj with an incompatible length.")
+        raise ValueError(
+            "Conditional IV projection received xj with an incompatible length."
+        )
     if len(xjs) != wfin.shape[0]:
-        raise ValueError("Conditional IV projection received xjs with an incompatible length.")
+        raise ValueError(
+            "Conditional IV projection received xjs with an incompatible length."
+        )
     if not np.isfinite(xj).all() or not np.isfinite(xjs).all():
-        raise ValueError("Conditional IV projection received non-finite xj or xjs values.")
+        raise ValueError(
+            "Conditional IV projection received non-finite xj or xjs values."
+        )
 
     wx = wfin.copy()
     wx[:, 0] = wfin[:, 0] * xj * xjs
@@ -265,7 +277,9 @@ def orthogonalize_w_cluster_iv(
         _, cl_idx = np.unique(cl_vec, return_inverse=True)
 
     if len(xj_indiv) != len(cl_vec):
-        raise ValueError("Clustered IV projection received xj_indiv with an incompatible length.")
+        raise ValueError(
+            "Clustered IV projection received xj_indiv with an incompatible length."
+        )
     if not np.isfinite(xj_indiv).all():
         raise ValueError("Clustered IV projection received non-finite xj_indiv values.")
 
@@ -292,7 +306,9 @@ def orthogonalize_w_cluster_iv(
         )
 
     if not np.isfinite(wx).all():
-        raise ValueError("Clustered conditional IV projection produced non-finite W values.")
+        raise ValueError(
+            "Clustered conditional IV projection produced non-finite W values."
+        )
 
     return wx
 
