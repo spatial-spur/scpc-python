@@ -137,4 +137,4 @@ Returned by `scpc()`.
 - `method` records the spatial algorithm actually used: `"exact"` or
   `"approx"`
 - `coef()`, `confint()`, `str(result)`, and `summary()` provide named access
-  and formatted display helpers.
+  and formatted display helpers in `scpc-python>=0.1.2`.
