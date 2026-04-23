@@ -125,9 +125,9 @@ Returned by `scpc()`.
 - `c0`
 - `cv`
 - `q`
+- `coef_names`
 - `method`
 - `large_n_seed`
-- `call`
 
 **Notes**
 
@@ -136,9 +136,5 @@ Returned by `scpc()`.
   upper bound
 - `method` records the spatial algorithm actually used: `"exact"` or
   `"approx"`
-- the stable access path in the current package is through these stored arrays
-  and metadata fields
-
-The type also declares `__str__()`, `summary()`, `coef()`, and `confint()`
-methods. In the current package state, the result object should be treated as a
-field-oriented container rather than relying on those helpers.
+- `coef()`, `confint()`, `str(result)`, and `summary()` provide named access
+  and formatted display helpers.

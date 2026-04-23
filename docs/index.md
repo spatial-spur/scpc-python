@@ -51,7 +51,11 @@ out = scpc(
     lat="lat",
 )
 
-out.scpcstats
+print(out)
+print(out.summary())
+out.coef()
+out.confint()
+out.confint(parm="gini")
 ```
 
 - `fit` is the fitted model
