@@ -65,7 +65,9 @@ def get_pyfixest_named_columns(
 
     missing = [name for name in names if name not in data.columns]
     if missing:
-        raise ValueError(f"{context} columns are missing from the stored pyfixest data.")
+        raise ValueError(
+            f"{context} columns are missing from the stored pyfixest data."
+        )
 
     values = np.asarray(data.loc[:, names], dtype=float)
     if values.ndim != 2 or values.shape != (n, len(names)):
@@ -98,7 +100,9 @@ def make_pyfixest_demeaner(model: ModelLike):
         if values.ndim != 2:
             raise ValueError(f"{context} must be a vector or matrix.")
         if values.shape[0] != len(fe):
-            raise ValueError(f"{context} does not line up with the stored fixed effects.")
+            raise ValueError(
+                f"{context} does not line up with the stored fixed effects."
+            )
         if values.shape[1] == 0:
             return values[:, 0] if vec_input else values
 
@@ -218,8 +222,7 @@ def get_scpc_model_matrix(model: ModelLike) -> MatrixLike:
     if is_pyfixest_model(model):
         if is_pyfixest_multi(model):
             raise ValueError(
-                "`scpc()` only accepts a single fitted pyfixest model, not "
-                "FixestMulti."
+                "`scpc()` only accepts a single fitted pyfixest model, not FixestMulti."
             )
 
         if is_fixest_iv_second_stage(model):
@@ -321,7 +324,9 @@ def has_fixest_fe(model: ModelLike) -> bool:
     return fixef_vars is not None and len(fixef_vars) > 0
 
 
-def get_fixest_iv_design(model: ModelLike) -> dict[str, MatrixLike | list[str] | None | bool]:
+def get_fixest_iv_design(
+    model: ModelLike,
+) -> dict[str, MatrixLike | list[str] | None | bool]:
     """Extract the stored IV design objects from a pyfixest fit.
 
     This mirrors `scpcR:::.get_fixest_iv_design()`. In the R code that helper
@@ -380,9 +385,7 @@ def get_fixest_iv_design(model: ModelLike) -> dict[str, MatrixLike | list[str] |
     has_intercept = "Intercept" in coef_names
     exo_no_intercept = [name for name in exo_names if name != "Intercept"]
     intercept = (
-        np.ones((n, 1), dtype=float)
-        if has_intercept
-        else np.empty((n, 0), dtype=float)
+        np.ones((n, 1), dtype=float) if has_intercept else np.empty((n, 0), dtype=float)
     )
     exo = get_pyfixest_named_columns(
         data,
@@ -478,7 +481,9 @@ def get_conditional_projection_setup(
             if bool(design["has_fixef"]):
                 demean = make_pyfixest_demeaner(model)
                 model_mat_iv = np.asarray(
-                    demean(model_mat_iv, context="pyfixest IV second-stage model matrix"),
+                    demean(
+                        model_mat_iv, context="pyfixest IV second-stage model matrix"
+                    ),
                     dtype=float,
                 )
             else:

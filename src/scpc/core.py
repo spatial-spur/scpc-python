@@ -8,6 +8,7 @@ import numpy as np
 
 from .types import DataFrameLike, ModelLike, SCPCResult
 from .utils.data import (
+    get_coef_names,
     get_conditional_projection_setup,
     get_fixest_bread_inv,
     get_fixest_score_matrix,
@@ -83,8 +84,7 @@ def scpc(
 
     if is_pyfixest_multi(model):
         raise ValueError(
-            "`scpc()` only accepts a single fitted pyfixest model, not "
-            "FixestMulti."
+            "`scpc()` only accepts a single fitted pyfixest model, not FixestMulti."
         )
 
     model_mat = get_scpc_model_matrix(model)
@@ -188,7 +188,9 @@ def scpc(
     q = wfin.shape[1] - 1
     large_n_random_state = spc.random_state
 
+    raw_coef_names = get_coef_names(model)
     k_use = p if ncoef is None else min(ncoef, p)
+    coef_names = raw_coef_names[:k_use]
     out = np.full((k_use, 6), np.nan)
     levs = np.array([0.32, 0.10, 0.05, 0.01], dtype=float)
     cvs_mat = np.full((k_use, 4), np.nan) if cvs else None
@@ -325,7 +327,7 @@ def scpc(
         c0=spc.c0,
         cv=cvfin,
         q=q,
+        coef_names=coef_names,
         method=spc.method,
         large_n_seed=large_n_seed,
-        call=None,  # TODO: add string representation or remove from result
     )

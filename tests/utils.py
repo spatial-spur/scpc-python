@@ -75,9 +75,7 @@ def normalize_r_score_names(score_names: list[str], coef_names: list[str]) -> li
             normalized.append(coef_name)
             continue
         if score_name != coef_name:
-            raise ValueError(
-                "R score column names do not match the coefficient names."
-            )
+            raise ValueError("R score column names do not match the coefficient names.")
         normalized.append(score_name)
 
     return normalized
@@ -111,7 +109,9 @@ def make_basic_iv_data(seed: int, n: int = 120) -> pd.DataFrame:
     )
 
 
-def make_one_way_fe_iv_data(seed: int, n_fe: int = 20, t_per_fe: int = 5) -> pd.DataFrame:
+def make_one_way_fe_iv_data(
+    seed: int, n_fe: int = 20, t_per_fe: int = 5
+) -> pd.DataFrame:
     """Build a one-way absorbed-fe IV dataset."""
     rng = np.random.default_rng(seed)
     n = n_fe * t_per_fe
@@ -146,9 +146,14 @@ def make_two_way_fe_iv_data(
     w = rng.normal(size=n)
     u = rng.normal(size=n)
     x = 0.7 * z + 0.2 * w + u
-    y = 1.0 + 1.1 * x + 0.35 * w + rng.normal(size=n1)[fe1 - 1] + rng.normal(
-        size=n2
-    )[fe2 - 1] + u
+    y = (
+        1.0
+        + 1.1 * x
+        + 0.35 * w
+        + rng.normal(size=n1)[fe1 - 1]
+        + rng.normal(size=n2)[fe2 - 1]
+        + u
+    )
     return pd.DataFrame(
         {
             "y": y,

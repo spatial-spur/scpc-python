@@ -4,10 +4,19 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
+import numpy as np
+import pandas as pd
+
+from .utils.results import resolve_parm_indices
+
 ArrayLike: TypeAlias = Any
 MatrixLike: TypeAlias = Any
 ModelLike: TypeAlias = Any
 DataFrameLike: TypeAlias = Any
+
+SCPC_STATS_COLUMNS = ["Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %"]
+SCPC_CV_COLUMNS = ["32%", "10%", "5%", "1%"]
+SCPC_CV_LEVELS = {0.68: 0, 0.90: 1, 0.95: 2, 0.99: 3}
 
 
 @dataclass(slots=True)
@@ -82,12 +91,12 @@ class SCPCResult:
     """Default 5 percent critical value used for intervals."""
     q: int
     """Number of spatial components kept in the final projection."""
-    method: str = "exact"
+    coef_names: list[str]
+    """Coefficient names aligned to rows of `scpcstats` and `scpccvs`."""
+    method: str = "exact"  # this is the actually used setting, so "auto" is missing
     """Spatial method actually used: `exact` or `approx`."""
     large_n_seed: int = 1
     """Seed used by the large-n approximation branch."""
-    call: str | None = None
-    """Text version of the original call, when available."""
 
     def __repr__(self) -> str:
         """Return a developer-oriented representation of the result.
@@ -99,7 +108,10 @@ class SCPCResult:
         Returns:
             A representation string.
         """
-        pass
+        return (
+            f"SCPCResult(ncoef={len(self.coef_names)}, q={self.q}, "
+            f"avc={self.avc!r}, method={self.method!r})"
+        )
 
     def __str__(self) -> str:
         """Return a user-facing summary string.
@@ -111,7 +123,24 @@ class SCPCResult:
         Returns:
             A formatted summary string.
         """
-        pass
+        stats = pd.DataFrame(
+            np.asarray(self.scpcstats, dtype=float),
+            index=self.coef_names,
+            columns=SCPC_STATS_COLUMNS,
+        )
+        lines = [
+            f"SCPC Inference (ncoef = {len(self.coef_names)}, q = {self.q})",
+            "",
+            stats.iloc[:, :4].to_string(),
+        ]
+        if self.scpccvs is not None:
+            cvs = pd.DataFrame(
+                np.asarray(self.scpccvs, dtype=float),
+                index=self.coef_names,
+                columns=SCPC_CV_COLUMNS,
+            )
+            lines.extend(["", "Two-sided critical values:", cvs.to_string()])
+        return "\n".join(lines)
 
     def summary(self) -> str:
         """Return an extended formatted summary.
@@ -123,7 +152,30 @@ class SCPCResult:
         Returns:
             A formatted summary string.
         """
-        pass
+        stats = pd.DataFrame(
+            np.asarray(self.scpcstats, dtype=float),
+            index=self.coef_names,
+            columns=SCPC_STATS_COLUMNS,
+        )
+        lines = [
+            (
+                f"SCPC Inference (ncoef = {len(self.coef_names)}, "
+                f"q = {self.q}, avc = {self.avc})"
+            ),
+            "",
+            stats.iloc[:, :4].to_string(),
+            "",
+            "95% Confidence Intervals:",
+            self.confint().to_string(),
+        ]
+        if self.scpccvs is not None:
+            cvs = pd.DataFrame(
+                np.asarray(self.scpccvs, dtype=float),
+                index=self.coef_names,
+                columns=SCPC_CV_COLUMNS,
+            )
+            lines.extend(["", "Two-sided critical values:", cvs.to_string()])
+        return "\n".join(lines)
 
     def coef(self) -> Any:
         """Return the coefficient estimates.
@@ -135,11 +187,12 @@ class SCPCResult:
         Returns:
             The coefficient estimates.
         """
-        pass
+        stats = np.asarray(self.scpcstats, dtype=float)
+        return pd.Series(stats[:, 0], index=self.coef_names, name="Coef")
 
     def confint(
         self,
-        parm: Sequence[str] | Sequence[int] | None = None,
+        parm: str | int | Sequence[str] | Sequence[int] | None = None,
         level: float = 0.95,
     ) -> Any:
         """Return confidence intervals for selected coefficients.
@@ -159,4 +212,28 @@ class SCPCResult:
             ValueError: Raised later for unknown coefficients or unsupported
                 confidence levels.
         """
-        pass
+        idx = resolve_parm_indices(self.coef_names, parm)
+        stats = np.asarray(self.scpcstats, dtype=float)
+        names = [self.coef_names[i] for i in idx]
+
+        if level == 0.95:
+            values = stats[idx, 4:6]
+        else:
+            if self.scpccvs is None:
+                raise ValueError(f"Confidence level {level} is not available.")
+            level_idx = SCPC_CV_LEVELS[level]
+            cvs = np.asarray(self.scpccvs, dtype=float)
+            cv_vals = cvs[idx, level_idx]
+            coef_vals = stats[idx, 0]
+            se_vals = stats[idx, 1]
+            values = np.column_stack(
+                (coef_vals - cv_vals * se_vals, coef_vals + cv_vals * se_vals)
+            )
+
+        lower = 100 * (1 - level) / 2
+        upper = 100 * (1 + level) / 2
+        return pd.DataFrame(
+            values,
+            index=names,
+            columns=[f"{lower:g} %", f"{upper:g} %"],
+        )

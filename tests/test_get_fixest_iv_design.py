@@ -153,14 +153,20 @@ def test_python_r_parity_get_fixest_iv_design() -> None:
     )
     py_value = get_fixest_iv_design(model)
     py_coef_names = [str(name) for name in model._coefnames]
-    r_x = reorder_r_columns_to_py(py_coef_names, [str(name) for name in r_value["x_names"]], np.array(r_value["X"]))
+    r_x = reorder_r_columns_to_py(
+        py_coef_names,
+        [str(name) for name in r_value["x_names"]],
+        np.array(r_value["X"]),
+    )
     r_model = reorder_r_columns_to_py(
         py_coef_names,
         [str(name) for name in r_value["model_names"]],
         np.array(r_value["model_mat"]),
     )
     z_order = ["w", "z"]
-    r_z = reorder_r_columns_to_py(z_order, [str(name) for name in r_value["z_names"]], np.array(r_value["Z"]))
+    r_z = reorder_r_columns_to_py(
+        z_order, [str(name) for name in r_value["z_names"]], np.array(r_value["Z"])
+    )
 
     npt.assert_allclose(py_value["X"], r_x, atol=ATOL, rtol=RTOL)
     npt.assert_allclose(py_value["Z"], r_z, atol=ATOL, rtol=RTOL)
