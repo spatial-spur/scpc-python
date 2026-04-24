@@ -20,19 +20,20 @@ uv pip install spur-python
 
 ## Example: Chetty Dataset
 
-`scpc-python` needs:
+In this example, we walk you through the SCPC inference workflow step-by-step.
+SCPC is the inference stage of the SPUR workflow, so we start from a fitted
+regression model. We also provide a one-stop [pipeline wrapper](#pipeline-wrapper)
+if you want to run the full SPUR workflow in one step.
 
-- a fitted model
-- the data used to fit that model
-- spatial coordinates supplied either as `lon` / `lat` or as Euclidean
-  coordinates
+### Data preparation
 
-The example below uses `load_chetty_data()` from `spur-python`.
+For illustration, we load the Chetty dataset from `spur-python`. Of course, the
+analysis in principle follows the same logic on any other dataset. In this
+specific case, we first omit the non-contiguous US states. We also drop rows
+with missing values.
 
 ```python
-from scpc import scpc
 from spur import load_chetty_data
-import statsmodels.formula.api as smf
 
 df = load_chetty_data()
 
@@ -41,8 +42,25 @@ df = df[~df["state"].isin(["AK", "HI"])][
 ].copy()
 
 df = df.dropna(subset=["am", "gini", "fracblack", "lat", "lon"])
+```
+
+### Fitting the regression
+
+SCPC needs a fitted model, the data used to fit that model, and spatial
+coordinates supplied either as `lon` / `lat` or as Euclidean coordinates.
+
+```python
+import statsmodels.formula.api as smf
 
 fit = smf.ols("am ~ gini + fracblack", data=df).fit()
+```
+
+### Running SCPC inference
+
+We suggest applying SCPC inference after estimating the regression:
+
+```python
+from scpc import scpc
 
 out = scpc(
     fit,
@@ -54,26 +72,21 @@ out = scpc(
 print(out)
 ```
 
-- `fit` is the fitted model
-- `data` is the underlying data frame
-- `lon` and `lat` identify the coordinate columns
+### Interpreting the output
+
+`print(out)` shows an R-like SCPC inference table. From `scpc-python>=0.1.2`,
+you can also use `out.coef()`, `out.confint()`, and `out.summary()` for named
+access. The raw arrays remain available as `out.scpcstats` and, when
+`cvs=True`, `out.scpccvs`.
 
 If your coordinates are Euclidean rather than geographic, use
 `coords_euclidean=[...]` instead of `lon` and `lat`.
 
-`print(out)` shows an R-like SCPC inference table. From
-`scpc-python>=0.1.2`, use `out.coef()`, `out.confint()`, and `out.summary()`
-for named access. The raw arrays remain available as `out.scpcstats` and, when
-`cvs=True`, `out.scpccvs`.
+### Pipeline wrapper
 
-If you need the diagnostic and transformation stage before inference, the
-easiest entry point is `spur-python`, which uses `scpc-python` internally for
-the inference step.
-
-## spur-python integration
-
-`scpc-python` is also a dependency of the `spur-python` package, so in
-particular, you can apply `scpc` as part of the pipeline using:
+As a shortcut to implementing the full SPUR workflow manually, use the
+`spur-python` pipeline wrapper. It runs the diagnostics, transformation, and
+SCPC inference steps in one call.
 
 ```python
 import spur
