@@ -1,14 +1,9 @@
 ![Tests](https://github.com/DGoettlich/scpc-python/actions/workflows/test.yaml/badge.svg)
 ![Python Version](https://img.shields.io/badge/python-3.11+-blue)
 
-```text
-███████  ██████ ██████   ██████       ██████  ██    ██ ████████ ██   ██  ██████  ███    ██ 
-██      ██      ██   ██ ██            ██   ██  ██  ██     ██    ██   ██ ██    ██ ████   ██ 
-███████ ██      ██████  ██      █████ ██████    ████      ██    ███████ ██    ██ ██ ██  ██ 
-     ██ ██      ██      ██            ██         ██       ██    ██   ██ ██    ██ ██  ██ ██ 
-███████  ██████ ██       ██████       ██         ██       ██    ██   ██  ██████  ██   ████ 
-                                                                                           
-```
+<p align="center">
+  <img src="assets/logo.png" alt="SPUR logo">
+</p>
 
 # scpc-python: Spatial Correlation-Robust Inference
 
