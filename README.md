@@ -25,18 +25,16 @@ If you encounter any issues or have any questions, please open an issue on GitHu
 
 ## Installation
 
-You can install `scpc-python` from PyPI (coming soon) with: 
+The package can be installed as standalone package:
 
-```python
-uv venv --python 3.11
+```bash
 uv pip install scpc-python
 ```
 
-or from GitHub with:
+or as `scpc-python` dependency with:
 
-```python
-uv venv --python 3.11
-uv pip install git+https://github.com/DGoettlich/scpc-python.git
+```bash
+uv pip install spur-python
 ```
 
 ## Basic Usage
