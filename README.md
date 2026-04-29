@@ -5,10 +5,23 @@
   <img src="assets/logo.png" alt="SPUR logo">
 </p>
 
-# scpc-python: Spatial Correlation-Robust Inference
+# scpc-python
 
-`scpc-python` provides spatial correlation-robust inference for regression
-coefficients following Müller and Watson (2022, 2023). 
+``scpc-python` provides spatial correlation-robust inference for regression coefficients following Müller and Watson (2022, 2023), implemented in Python based on their [original Stata implementation](https://github.com/ukmueller/SCPC).
+
+**When using this code, please cite [Becker, Boll and Voth (2026)](https://pauldavidboll.com/SPUR_Stata_Journal_website.pdf):**
+
+```bibtex
+@Article{becker2026,
+  author    = {Becker, Sascha O. and Boll, P. David and Voth, Hans-Joachim},
+  title     = {Testing and Correcting for Spatial Unit Roots in Regression Analysis},
+  journal   = {Stata Journal},
+  year      = {forthcoming},
+  note      = {Forthcoming}
+}
+```
+
+If you encounter any issues or have any questions, please open an issue on GitHub or contact the authors.
 
 ## Installation
 
@@ -97,3 +110,15 @@ The most important `scpc()` arguments in the workflow above are:
 - `avc`: upper bound on the average pairwise correlation
 - `uncond`: whether to skip the conditional adjustment
 - `cvs`: whether to store the extra critical values
+
+## Documentation
+
+Please refer to [the package documentation](https://spatial-spur.github.io/scpcR/) for detailed information and other (R, Python, Stata) packages.
+
+## References
+
+Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting for Spatial Unit Roots in Regression Analysis", Forthcoming at the Stata Journal.
+
+Müller, Ulrich K. and Mark W. Watson "Spatial Correlation Robust Inference", Econometrica 90(6) (2022), 2901–2935. https://www.princeton.edu/~umueller/SHAR.pdf.
+
+Müller, Ulrich K. and Mark W. Watson "Spatial Correlation Robust Inference in Linear Regression and Panel Models", Journal of Business & Economic Statistics 41(4) (2023), 1050–1064. https://www.princeton.edu/~umueller/SpatialRegression.pdf.
