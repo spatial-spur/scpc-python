@@ -7,7 +7,7 @@
 
 # scpc-python
 
-``scpc-python` provides spatial correlation-robust inference for regression coefficients following Müller and Watson (2022, 2023), implemented in Python based on their [original Stata implementation](https://github.com/ukmueller/SCPC).
+`scpc-python` provides spatial correlation-robust inference for regression coefficients following Müller and Watson (2022, 2023), implemented in Python based on their [original Stata implementation](https://github.com/ukmueller/SCPC).
 
 **When using this code, please cite [Becker, Boll and Voth (2026)](https://pauldavidboll.com/SPUR_Stata_Journal_website.pdf):**
 
