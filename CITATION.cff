@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use scpc-python, please cite Becker et al. 2026, Müller & Watson 2022, and Müller & Watson 2023."
+message: "If you use scpc-python, please cite Becker, Boll and Voth 2026, Müller & Watson 2022, and Müller & Watson 2023."
 title: "scpc-python: Spatial Correlation-Robust Inference"
 version: "0.1.2"
 license: MIT
