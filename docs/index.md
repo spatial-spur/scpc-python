@@ -1,4 +1,10 @@
+<div class="package-overview-header" markdown="1">
+
 # scpc-python
+
+[GitHub repository](https://github.com/spatial-spur/scpc-python){ .md-button }
+
+</div>
 
 `scpc-python` provides the SCPC inference stage of the SPUR workflow for
 cross-sectional regressions with spatial dependence. For the diagnostic and
