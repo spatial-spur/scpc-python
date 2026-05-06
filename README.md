@@ -7,9 +7,9 @@
 
 # scpc-python
 
-`scpc-python` provides spatial correlation-robust inference for regression coefficients following Müller and Watson (2022, 2023), implemented in Python based on their [original Stata implementation](https://github.com/ukmueller/SCPC).
+`scpc-python` provides spatial correlation-robust inference for regression coefficients following Müller & Watson 2022 and Müller & Watson 2023, implemented in Python based on their [original Stata implementation](https://github.com/ukmueller/SCPC).
 
-**Citation:** If you use this package, please cite `bbv2026`, `mw2022`, and `mw2023`. See [CITATION.cff](CITATION.cff) for copyable citation metadata.
+**Citation:** If you use this package, please cite Becker et al. 2026, Müller & Watson 2022, and Müller & Watson 2023. See [CITATION.bib](CITATION.bib) for the BibTeX entries.
 
 If you encounter any issues or have any questions, please open an issue on GitHub or contact the authors.
 
@@ -29,7 +29,7 @@ uv pip install spur-python
 
 ## Basic Usage
 
-This example starts from the transformed branch of the Becker, Boll, and Voth (2026)
+This example starts from the transformed branch of the Becker et al. 2026
 workflow. In the full workflow, you would first use `spurtest` to decide
 whether to stay in levels or transform. Here we assume the transformed branch
 and move directly to the regression plus `scpc` step.
