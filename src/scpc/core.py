@@ -183,7 +183,7 @@ def scpc(
     if not spc.large_n:
         if spc.distmat is None:
             raise ValueError("Internal error: exact SCPC setup is missing `distmat`.")
-        d = np.asarray(spc.distmat, dtype=float)
+        d = spc.distmat
 
     wfin = np.asarray(spc.wfin, dtype=float)
     cvfin = spc.cvfin
@@ -293,7 +293,7 @@ def scpc(
                     raise ValueError(
                         "Internal error: exact SCPC conditional branch is missing `distmat`."
                     )
-                omsx = get_oms(d, spc.c0, spc.cmax, wx, 1.2)
+                omsx = get_oms(d, spc.c0, spc.cmax, wx, 1.2, dtype=dtype)
             p_c = max_rp(omsx, q, abs(tau_u) / math.sqrt(q))[0]
             cvx = get_cv(omsx, q, 0.05)
             p_final = max(p_u, p_c)

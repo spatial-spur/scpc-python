@@ -7,7 +7,8 @@ import pytest
 import statsmodels.formula.api as smf
 
 from scpc import scpc
-from scpc.types import SCPCResult
+import scpc.core as scpc_core
+from scpc.types import DType, SCPCResult
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
 
@@ -64,6 +65,49 @@ def test_scpc_rejects_invalid_dtype() -> None:
             coords_euclidean=("coord_x", "coord_y"),
             dtype="float128",  # type: ignore  # intentional invalid dtype
         )
+
+
+def test_scpc_conditional_exact_keeps_requested_distance_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = pd.DataFrame(
+        {
+            "y": [1.0, 1.8, 2.9, 3.7, 5.1],
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0],
+            "coord_x": [0.0, 1.0, 0.5, 1.5, 2.0],
+            "coord_y": [0.0, 0.0, 1.0, 1.0, 1.5],
+        }
+    )
+    model = smf.ols("y ~ x", data=data).fit()
+    calls: list[tuple[np.dtype, DType]] = []
+    original_get_oms = scpc_core.get_oms
+
+    def recording_get_oms(
+        distmat,
+        c0,
+        cmax,
+        w,
+        cgridfac,
+        dtype: DType = "float64",
+    ):
+        calls.append((np.asarray(distmat).dtype, dtype))
+        return original_get_oms(distmat, c0, cmax, w, cgridfac, dtype=dtype)
+
+    monkeypatch.setattr(scpc_core, "get_oms", recording_get_oms)
+
+    scpc(
+        model,
+        data,
+        coords_euclidean=("coord_x", "coord_y"),
+        avc=0.1,
+        method="exact",
+        uncond=False,
+        dtype="float32",
+    )
+
+    assert calls
+    assert all(dist_dtype == np.float32 for dist_dtype, _ in calls)
+    assert all(dtype == "float32" for _, dtype in calls)
 
 
 def test_scpc_stores_only_reported_coef_names_when_ncoef_is_set() -> None:
