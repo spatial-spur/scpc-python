@@ -6,7 +6,7 @@ import numpy as np
 from scipy import stats
 from scipy.sparse.linalg import eigsh
 
-from ..types import ArrayLike, MatrixLike, SpatialSetup
+from ..types import ArrayLike, DType, MatrixLike, SpatialSetup
 from .matrix import demeanmat, get_w, lvech
 
 LARGE_N_THRESHOLD = 4500
@@ -36,11 +36,15 @@ def get_avc(c: float, dist: ArrayLike) -> float:
     Returns:
         The implied average pairwise correlation.
     """
-    dist = np.asarray(dist, dtype=float)
+    dist = np.asarray(dist)
     return float(np.mean(np.exp(-c * dist)))
 
 
-def get_distmat(s: MatrixLike, latlong: bool) -> MatrixLike:
+def get_distmat(
+    s: MatrixLike,
+    latlong: bool,
+    dtype: DType = "float64",
+) -> MatrixLike:
     """Compute the pairwise distance matrix from observation coordinates.
 
     This helper is the boundary between raw location data and the rest of the
@@ -57,7 +61,7 @@ def get_distmat(s: MatrixLike, latlong: bool) -> MatrixLike:
     Raises:
         ValueError: Raised later for invalid coordinate shapes.
     """
-    s = np.asarray(s, dtype=float)
+    s = np.asarray(s, dtype=dtype)
     if s.ndim == 1:
         s = s.reshape(-1, 1)
 
@@ -83,7 +87,7 @@ def get_distmat(s: MatrixLike, latlong: bool) -> MatrixLike:
     else:
         d = np.sqrt(np.sum((s[:, None, :] - s[None, :, :]) ** 2, axis=2))
 
-    return d
+    return d.astype(dtype, copy=False)
 
 
 def get_distvec(s1: MatrixLike, s2: MatrixLike, latlong: bool) -> ArrayLike:
@@ -467,6 +471,7 @@ def set_final_w(
     oms: list[MatrixLike],
     w: MatrixLike,
     qmax: int,
+    dtype: DType = "float64",
 ) -> tuple[MatrixLike, float, int]:
     """Choose how many spatial principal components to keep.
 
@@ -488,7 +493,7 @@ def set_final_w(
     Raises:
         ValueError: Raised later if the inputs are dimensionally incompatible.
     """
-    w = np.asarray(w, dtype=float)
+    w = np.asarray(w, dtype=dtype)
     cvs = np.empty(qmax, dtype=float)
     lengths = np.empty(qmax, dtype=float)
 
@@ -528,6 +533,7 @@ def get_oms(
     cmax: float,
     w: MatrixLike,
     cgridfac: float,
+    dtype: DType = "float64",
 ) -> list[MatrixLike]:
     """Build omega matrices over the spatial correlation grid.
 
@@ -545,14 +551,14 @@ def get_oms(
     Returns:
         Omega matrices across the spatial correlation grid.
     """
-    distmat = np.asarray(distmat, dtype=float)
-    w = np.asarray(w, dtype=float)
+    distmat = np.asarray(distmat, dtype=dtype)
+    w = np.asarray(w, dtype=dtype)
 
     nc = get_nc(c0, cmax, cgridfac)
     oms: list[MatrixLike] = [np.empty((0, 0)) for _ in range(nc)]
     c = c0
     for i in range(nc):
-        oms[i] = w.T @ (np.exp(-c * distmat) @ w)
+        oms[i] = w.T @ (np.exp(-c * distmat).astype(dtype, copy=False) @ w)
         c = c * cgridfac
 
     return oms
@@ -564,6 +570,7 @@ def set_oms_wfin(
     latlong: bool,
     method: str = "auto",
     large_n_seed: int = 1,
+    dtype: DType = "float64",
 ) -> SpatialSetup:
     """Build the unconditional spatial setup from coordinates and an AVC bound.
 
@@ -580,7 +587,7 @@ def set_oms_wfin(
     Returns:
         The complete spatial setup used by the main inference routine.
     """
-    coords = np.asarray(coords, dtype=float)
+    coords = np.asarray(coords, dtype=dtype)
     n = coords.shape[0]
 
     if method == "auto":
@@ -606,12 +613,12 @@ def set_oms_wfin(
         qmax = min(qmax, n - 1)
 
         if method_actual == "exact":
-            distmat = get_distmat(coords, latlong)
-            distv = lvech(distmat)
+            distmat = get_distmat(coords, latlong, dtype=dtype)
+            distv = lvech(distmat, dtype=dtype)
             c0 = get_c0_from_avc(distv, avc0)
             cmax = get_c0_from_avc(distv, MINAVC)
-            w = get_w(distmat, c0, qmax)
-            oms = get_oms(distmat, c0, cmax, w, CGRIDFAC)
+            w = get_w(distmat, c0, qmax, dtype=dtype)
+            oms = get_oms(distmat, c0, cmax, w, CGRIDFAC, dtype=dtype)
             coords_use = coords
             perm = np.arange(n, dtype=int)
             random_t = None
@@ -640,7 +647,7 @@ def set_oms_wfin(
             )
             distmat = None
 
-        wfin, cvfin, q = set_final_w(oms, w, qmax)
+        wfin, cvfin, q = set_final_w(oms, w, qmax, dtype=dtype)
         if q < qmax or qmax == n - 1:
             break
         qmax = round(qmax + qmax / 2)

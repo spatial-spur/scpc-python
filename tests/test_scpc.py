@@ -46,6 +46,26 @@ def test_scpc_returns_a_result_with_the_expected_structure() -> None:
     assert result.coef_names == ["Intercept", "x"]
 
 
+def test_scpc_rejects_invalid_dtype() -> None:
+    data = pd.DataFrame(
+        {
+            "y": [1.0, 1.8, 2.9, 3.7, 5.1],
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0],
+            "coord_x": [0.0, 1.0, 0.5, 1.5, 2.0],
+            "coord_y": [0.0, 0.0, 1.0, 1.0, 1.5],
+        }
+    )
+    model = smf.ols("y ~ x", data=data).fit()
+
+    with pytest.raises(AssertionError):
+        scpc(
+            model,
+            data,
+            coords_euclidean=("coord_x", "coord_y"),
+            dtype="float128",  # type: ignore  # intentional invalid dtype
+        )
+
+
 def test_scpc_stores_only_reported_coef_names_when_ncoef_is_set() -> None:
     data = pd.DataFrame(
         {

@@ -53,6 +53,29 @@ def test_set_oms_wfin_returns_a_coherent_exact_spatial_setup() -> None:
     assert result.random_state is None
 
 
+def test_set_oms_wfin_preserves_requested_exact_spatial_dtype() -> None:
+    coords = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.5, 1.0],
+        ]
+    )
+
+    result = set_oms_wfin(
+        coords,
+        0.1,
+        latlong=False,
+        method="exact",
+        large_n_seed=1,
+        dtype="float32",
+    )
+
+    assert result.distmat is not None
+    assert np.asarray(result.distmat).dtype == np.float32
+    assert np.asarray(result.wfin).dtype == np.float32
+
+
 def test_set_oms_wfin_returns_a_coherent_approximate_spatial_setup() -> None:
     coords = np.array([[0.0], [1.0], [2.0], [3.0]])
 
