@@ -32,6 +32,14 @@ def test_get_w_builds_the_expected_two_point_basis() -> None:
     assert_columns_allclose_up_to_sign(get_w(distmat, math.log(2.0), 1), expected)
 
 
+def test_get_w_preserves_requested_float16_dtype() -> None:
+    distmat = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    result = get_w(distmat, math.log(2.0), 1, dtype="float16")
+
+    assert result.dtype == np.float16
+
+
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_get_w() -> None:
     distmat = [[0.0, 1.0], [1.0, 0.0]]

@@ -5,10 +5,10 @@ import math
 import numpy as np
 from scipy.sparse.linalg import eigsh
 
-from ..types import ArrayLike, MatrixLike
+from ..types import ArrayLike, DType, MatrixLike
 
 
-def lvech(mat: MatrixLike) -> ArrayLike:
+def lvech(mat: MatrixLike, dtype: DType = "float64") -> ArrayLike:
     """Collect the strict lower triangle of a matrix.
 
     This helper turns a square matrix into the vector of pairwise entries
@@ -21,11 +21,11 @@ def lvech(mat: MatrixLike) -> ArrayLike:
     Returns:
         The strict lower-triangular entries as a vector-like object.
     """
-    mat = np.asarray(mat, dtype=float)
+    mat = np.asarray(mat, dtype=dtype)
     return mat[np.tril_indices(mat.shape[0], k=-1)]
 
 
-def demeanmat(mat: MatrixLike) -> MatrixLike:
+def demeanmat(mat: MatrixLike, dtype: DType = "float64") -> MatrixLike:
     """Remove row and column averages from a matrix.
 
     This helper converts a matrix into its double-demeaned version. In SCPC,
@@ -39,7 +39,7 @@ def demeanmat(mat: MatrixLike) -> MatrixLike:
     Returns:
         The double-demeaned matrix.
     """
-    mat = np.asarray(mat, dtype=float)
+    mat = np.asarray(mat, dtype=dtype)
 
     # remove row means first, then column means from the row-demeaned matrix
     mat = mat - np.mean(mat, axis=1, keepdims=True)
@@ -47,7 +47,12 @@ def demeanmat(mat: MatrixLike) -> MatrixLike:
     return mat
 
 
-def get_w(distmat: MatrixLike, c0: float, qmax: int) -> MatrixLike:
+def get_w(
+    distmat: MatrixLike,
+    c0: float,
+    qmax: int,
+    dtype: DType = "float64",
+) -> MatrixLike:
     """Build the candidate spatial projection basis.
 
     This helper converts a distance matrix and kernel scale into the matrix of
@@ -62,22 +67,26 @@ def get_w(distmat: MatrixLike, c0: float, qmax: int) -> MatrixLike:
     Returns:
         The candidate spatial projection matrix.
     """
-    distmat = np.asarray(distmat, dtype=float)
+    distmat = np.asarray(distmat, dtype=dtype)
     n = distmat.shape[0]
     sig = np.exp(-c0 * distmat)
-    sig_d = demeanmat(sig)
+    sig_d = demeanmat(sig, dtype=dtype)
+    sig_d_eig = np.asarray(sig_d, dtype="float32" if dtype == "float16" else dtype)
 
     if qmax < n - 1:
-        eigvals, v = eigsh(sig_d, k=qmax, which="LM")
+        eigvals, v = eigsh(sig_d_eig, k=qmax, which="LM")
         order = np.argsort(np.abs(eigvals))[::-1]
         v = v[:, order]
     else:
-        eigvals, v = np.linalg.eigh(sig_d)
+        eigvals, v = np.linalg.eigh(sig_d_eig)
         order = np.argsort(eigvals)[::-1]
         v = v[:, order[:qmax]]
 
     # prepend the normalized constant direction, matching the R code
-    return np.column_stack((np.full(n, 1 / math.sqrt(n)), v))
+    return np.column_stack((np.full(n, 1 / math.sqrt(n), dtype=dtype), v)).astype(
+        dtype,
+        copy=False,
+    )
 
 
 def get_tau(y: ArrayLike, w: MatrixLike) -> float:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, TypeAlias, TypedDict
+from typing import Any, Literal, TypeAlias, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -13,6 +13,7 @@ ArrayLike: TypeAlias = Any
 MatrixLike: TypeAlias = Any
 ModelLike: TypeAlias = Any
 DataFrameLike: TypeAlias = Any
+DType: TypeAlias = Literal["float16", "float32", "float64"]
 
 SCPC_STATS_COLUMNS = ["Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %"]
 SCPC_CV_COLUMNS = ["32%", "10%", "5%", "1%"]

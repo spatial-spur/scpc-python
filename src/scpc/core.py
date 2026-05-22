@@ -6,7 +6,7 @@ import warnings
 
 import numpy as np
 
-from .types import DataFrameLike, ModelLike, SCPCResult
+from .types import DType, DataFrameLike, ModelLike, SCPCResult
 from .utils.data import (
     get_coef_names,
     get_conditional_projection_setup,
@@ -49,6 +49,7 @@ def scpc(
     large_n_seed: int = 1,
     uncond: bool = False,
     cvs: bool = False,
+    dtype: DType = "float64",
 ) -> SCPCResult:
     """Run spatial correlation-robust inference.
 
@@ -69,6 +70,7 @@ def scpc(
         large_n_seed: Seed for the large-n approximation branch.
         uncond: Whether to skip the conditional adjustment.
         cvs: Whether to return additional critical values.
+        dtype: Floating point dtype for memory-heavy spatial arrays.
 
     Returns:
         The fitted SCPC result object.
@@ -79,6 +81,7 @@ def scpc(
 
     if avc <= 0.001 or avc >= 0.99:
         raise ValueError("Option avc() must be in (0.001, 0.99).")
+    assert dtype in {"float16", "float32", "float64"}
     method = validate_scpc_method(method)
     large_n_seed = validate_large_n_seed(large_n_seed)
 
@@ -174,12 +177,13 @@ def scpc(
         latlong,
         method=method,
         large_n_seed=large_n_seed,
+        dtype=dtype,
     )
     d = None
     if not spc.large_n:
         if spc.distmat is None:
             raise ValueError("Internal error: exact SCPC setup is missing `distmat`.")
-        d = np.asarray(spc.distmat, dtype=float)
+        d = spc.distmat
 
     wfin = np.asarray(spc.wfin, dtype=float)
     cvfin = spc.cvfin
@@ -289,7 +293,7 @@ def scpc(
                     raise ValueError(
                         "Internal error: exact SCPC conditional branch is missing `distmat`."
                     )
-                omsx = get_oms(d, spc.c0, spc.cmax, wx, 1.2)
+                omsx = get_oms(d, spc.c0, spc.cmax, wx, 1.2, dtype=dtype)
             p_c = max_rp(omsx, q, abs(tau_u) / math.sqrt(q))[0]
             cvx = get_cv(omsx, q, 0.05)
             p_final = max(p_u, p_c)

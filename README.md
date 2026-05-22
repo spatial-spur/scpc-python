@@ -98,6 +98,8 @@ The most important `scpc()` arguments in the workflow above are:
 - `avc`: upper bound on the average pairwise correlation
 - `uncond`: whether to skip the conditional adjustment
 - `cvs`: whether to store the extra critical values
+- `dtype`: spatial array dtype, one of `"float16"`, `"float32"`, or `"float64"`
+  (default)
 
 ## Documentation
 

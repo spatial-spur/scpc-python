@@ -22,6 +22,14 @@ def test_get_distmat_returns_euclidean_distances() -> None:
     npt.assert_allclose(get_distmat(coords, False), expected, atol=1e-12, rtol=0.0)
 
 
+def test_get_distmat_preserves_requested_dtype() -> None:
+    coords = np.array([[0.0, 0.0], [3.0, 4.0]])
+
+    result = get_distmat(coords, False, dtype="float32")
+
+    assert result.dtype == np.float32
+
+
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_get_distmat() -> None:
     coords = np.array([[0.0, 0.0], [3.0, 4.0], [6.0, 8.0]])
