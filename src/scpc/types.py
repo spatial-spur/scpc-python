@@ -108,6 +108,8 @@ class SCPCResult:
     """Spatial method actually used: `exact` or `approx`."""
     large_n_seed: int = 1
     """Seed used by the large-n approximation branch."""
+    backend: str = "fallback"
+    """Execution backend actually used: `rust` or `fallback`."""
 
     def __repr__(self) -> str:
         """Return a developer-oriented representation of the result.

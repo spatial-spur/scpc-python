@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import importlib
 import math
+import os
+from typing import Any
 import warnings
 
 import numpy as np
 
-from .types import DataFrameLike, ModelLike, SCPCResult
+from .types import DataFrameLike, MatrixLike, ModelLike, SCPCResult
 from .utils.data import (
     get_coef_names,
     get_conditional_projection_setup,
@@ -25,6 +28,7 @@ from .utils.matrix import (
     orthogonalize_w_iv,
 )
 from .utils.spatial import (
+    LARGE_N_THRESHOLD,
     get_cv,
     get_oms,
     lnget_oms,
@@ -33,6 +37,73 @@ from .utils.spatial import (
     validate_large_n_seed,
     validate_scpc_method,
 )
+
+VALID_BACKENDS = {"auto", "rust", "fallback"}
+RUST_API_VERSION = 1
+
+
+def resolve_backend(backend: object) -> str:
+    """Resolve the execution backend from argument and `SPATIAL_BACKEND`."""
+    if not isinstance(backend, str) or backend not in VALID_BACKENDS:
+        raise ValueError('`backend` must be one of "auto", "rust", or "fallback".')
+    if backend == "auto":
+        env_backend = os.environ.get("SPATIAL_BACKEND", "auto") or "auto"
+        if env_backend not in VALID_BACKENDS:
+            raise ValueError(
+                '`SPATIAL_BACKEND` must be one of "auto", "rust", or "fallback".'
+            )
+        return env_backend
+    return backend
+
+
+def validate_nthreads(nthreads: object) -> int | None:
+    """Validate optional thread budget (`None` or integer >= 1)."""
+    if nthreads is None:
+        return None
+    if (
+        isinstance(nthreads, bool)
+        or not isinstance(nthreads, (int, np.integer))
+        or int(nthreads) < 1
+    ):
+        raise ValueError("`nthreads` must be a positive integer or None.")
+    return int(nthreads)
+
+
+def load_rust_backend() -> Any | None:
+    """Import the compiled Rust extension module if present and ABI-compatible."""
+    try:
+        rust_mod = importlib.import_module("spatial_spur_rust")
+    except ImportError:
+        return None
+    if getattr(rust_mod, "API_VERSION", None) != RUST_API_VERSION:
+        return None
+    return rust_mod
+
+
+def compute_orthogonal_projector(
+    model_mat: MatrixLike,
+    *,
+    include_intercept: bool,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Compute orthonormal `(U, V)` factors for `I - X X^+` via thin SVD."""
+    x_design = np.asarray(model_mat, dtype=np.float64)
+    columns = getattr(model_mat, "columns", None)
+    has_intercept_col = columns is not None and "(Intercept)" in columns
+    if include_intercept and not has_intercept_col:
+        x_design = np.column_stack(
+            (np.ones(x_design.shape[0], dtype=np.float64), x_design)
+        )
+    if x_design.shape[1] == 0:
+        return None, None
+    u, s, _ = np.linalg.svd(x_design, full_matrices=False)
+    if s.size == 0 or s[0] <= 0.0:
+        return None, None
+    tol = 1e-12 * max(x_design.shape) * s[0]
+    keep = s > tol
+    if not np.any(keep):
+        return None, None
+    proj = np.ascontiguousarray(u[:, keep], dtype=np.float64)
+    return proj, proj
 
 
 def scpc(
@@ -49,6 +120,8 @@ def scpc(
     large_n_seed: int = 1,
     uncond: bool = False,
     cvs: bool = False,
+    backend: str = "auto",
+    nthreads: int | None = None,
 ) -> SCPCResult:
     """Run spatial correlation-robust inference.
 
@@ -69,6 +142,8 @@ def scpc(
         large_n_seed: Seed for the large-n approximation branch.
         uncond: Whether to skip the conditional adjustment.
         cvs: Whether to return additional critical values.
+        backend: Execution backend (`"auto"`, `"rust"`, or `"fallback"`).
+        nthreads: Optional thread budget for compiled execution (`None` or >= 1).
 
     Returns:
         The fitted SCPC result object.
@@ -81,6 +156,8 @@ def scpc(
         raise ValueError("Option avc() must be in (0.001, 0.99).")
     method = validate_scpc_method(method)
     large_n_seed = validate_large_n_seed(large_n_seed)
+    resolved_backend = resolve_backend(backend)
+    resolved_nthreads = validate_nthreads(nthreads)
 
     if is_pyfixest_multi(model):
         raise ValueError(
@@ -168,6 +245,101 @@ def scpc(
     if coords.shape[1] == 1:
         coords = np.column_stack((coords, np.zeros(coords.shape[0])))
 
+    raw_coef_names = get_coef_names(model)
+    k_use = p if ncoef is None else min(ncoef, p)
+    coef_names = raw_coef_names[:k_use]
+
+    is_m1_exact = (
+        method != "approx"
+        and (method == "exact" or neff < LARGE_N_THRESHOLD)
+        and cluster is None
+        and cond_fixef_id is None
+        and not cond_is_iv
+        and k_use >= 1
+    )
+
+    if resolved_backend != "fallback":
+        rust_mod = load_rust_backend()
+        if resolved_backend == "rust":
+            if rust_mod is None:
+                raise RuntimeError(
+                    "Rust backend requested (`backend='rust'`), but "
+                    "`spatial_spur_rust` (API_VERSION=1) is not installed."
+                )
+            if not is_m1_exact:
+                reasons: list[str] = []
+                if method == "approx" or (
+                    method == "auto" and neff >= LARGE_N_THRESHOLD
+                ):
+                    reasons.append("approximate large-n method")
+                if cluster is not None:
+                    reasons.append("clustered inference")
+                if cond_fixef_id is not None:
+                    reasons.append("absorbed fixed-effect demeaning")
+                if cond_is_iv:
+                    reasons.append("instrumental variables")
+                if k_use < 1:
+                    reasons.append("non-positive ncoef")
+                raise NotImplementedError(
+                    "Rust backend does not support "
+                    + ", ".join(reasons)
+                    + " in Milestone 1."
+                )
+
+        if rust_mod is not None and is_m1_exact:
+            coords_mat = np.ascontiguousarray(coords, dtype=np.float64)
+            coef_use = np.ascontiguousarray(coef[:k_use], dtype=np.float64)
+            wj_mat = np.ascontiguousarray(
+                neff * (s @ bread_inv[:k_use, :].T) + coef_use[None, :],
+                dtype=np.float64,
+            )
+            if uncond:
+                xj_mat = None
+                xjs_mat = None
+                proj_u = None
+                proj_v = None
+            else:
+                xj_mat = np.ascontiguousarray(
+                    neff * (model_mat_cond @ bread_inv[:k_use, :].T),
+                    dtype=np.float64,
+                )
+                xjs_mat = np.ascontiguousarray(np.sign(xj_mat), dtype=np.float64)
+                proj_u, proj_v = compute_orthogonal_projector(
+                    model_mat_cond,
+                    include_intercept=cond_include_intercept,
+                )
+
+            rust_res = rust_mod.run_exact_scpc(
+                coords_mat,
+                coef_use,
+                wj_mat,
+                float(avc),
+                latlong=bool(latlong),
+                uncond=bool(uncond),
+                cvs=bool(cvs),
+                xj=xj_mat,
+                xjs=xjs_mat,
+                proj_u=proj_u,
+                proj_v=proj_v,
+                nthreads=resolved_nthreads,
+            )
+            if not (rust_res["tied"] and resolved_backend == "auto"):
+                return SCPCResult(
+                    scpcstats=np.asarray(rust_res["scpcstats"], dtype=float),
+                    scpccvs=None
+                    if rust_res["scpccvs"] is None
+                    else np.asarray(rust_res["scpccvs"], dtype=float),
+                    w=np.asarray(rust_res["wfin"], dtype=float),
+                    avc=avc,
+                    c0=float(rust_res["c0"]),
+                    cv=float(rust_res["cv"]),
+                    q=int(rust_res["q"]),
+                    coef_names=coef_names,
+                    method="exact",
+                    large_n_seed=large_n_seed,
+                    backend="rust",
+                )
+
     spc = set_oms_wfin(
         coords,
         avc,
@@ -188,9 +360,6 @@ def scpc(
     q = wfin.shape[1] - 1
     large_n_random_state = spc.random_state
 
-    raw_coef_names = get_coef_names(model)
-    k_use = p if ncoef is None else min(ncoef, p)
-    coef_names = raw_coef_names[:k_use]
     out = np.full((k_use, 6), np.nan)
     levs = np.array([0.32, 0.10, 0.05, 0.01], dtype=float)
     cvs_mat = np.full((k_use, 4), np.nan) if cvs else None
@@ -330,4 +499,5 @@ def scpc(
         coef_names=coef_names,
         method=spc.method,
         large_n_seed=large_n_seed,
+        backend="fallback",
     )

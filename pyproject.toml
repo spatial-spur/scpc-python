@@ -12,6 +12,9 @@ dependencies = [
     "statsmodels>=0.14.6",
 ]
 
+[project.optional-dependencies]
+rust = ["spatial-spur-rust>=0.2.0"]
+
 [dependency-groups]
 dev = [
     "coverage>=7.10.6",
