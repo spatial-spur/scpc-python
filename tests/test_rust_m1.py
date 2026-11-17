@@ -20,7 +20,13 @@ from scpc import scpc
 from scpc.core import load_rust_backend
 from scpc.utils.matrix import lvech
 from scpc.utils.spatial import get_avc, get_distmat, get_rp
-from tests.utils import make_basic_iv_data
+from tests.utils import (
+    make_basic_iv_data,
+    make_clustered_fe_iv_data,
+    make_clustered_iv_data,
+    make_one_way_fe_iv_data,
+    make_two_way_fe_iv_data,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "verification" / "data"
@@ -134,7 +140,7 @@ def make_direct_ffi_inputs() -> tuple[
 
 def test_spatial_spur_rust_api_version_fortran_layout_and_validation() -> None:
     rust_mod: Any = pytest.importorskip("spatial_spur_rust")
-    assert rust_mod.API_VERSION == 2
+    assert rust_mod.API_VERSION == 5
 
     coords, coef, wj, xj, xjs, u = make_direct_ffi_inputs()
 
@@ -963,78 +969,132 @@ def test_unsupported_modes_raise_on_rust_and_fallback_on_auto(
     monkeypatch.delenv("SPATIAL_BACKEND", raising=False)
     has_rust = rust_available()
 
-    # 1. Clustered inference
+    # 1. Clustered inference is now supported on Rust exact OLS
     cl_data = pd.DataFrame(
         {
-            "y": [2.1, 2.3, 0.9, 1.2, 1.6, 1.8],
-            "x": [1.0, 1.2, 0.0, 0.2, 0.5, 0.7],
-            "coord_x": [2.0, 2.0, 0.0, 0.0, 1.0, 1.0],
-            "coord_y": [0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
-            "cluster": ["a", "a", "b", "b", "c", "c"],
+            "y": [2.1, 2.3, 0.9, 1.2, 1.6, 1.8, 3.0, 3.2, 0.4, 0.6],
+            "x": [1.0, 1.2, 0.0, 0.2, 0.5, 0.7, 1.5, 1.7, -0.3, -0.1],
+            "coord_x": [2.0, 2.0, 0.0, 0.0, 1.0, 1.0, 3.5, 3.5, 5.0, 5.0],
+            "coord_y": [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 0.5, 0.5, 2.5, 2.5],
+            "cluster": ["a", "a", "b", "b", "c", "c", "d", "d", "e", "e"],
         }
     )
     cl_model = smf.ols("y ~ x", data=cl_data).fit()
-    if has_rust:
-        with pytest.raises(NotImplementedError, match="clustered"):
-            scpc(
-                cl_model,
-                cl_data,
-                coords_euclidean=("coord_x", "coord_y"),
-                cluster="cluster",
-                backend="rust",
-            )
+    res_cl_fb = scpc(
+        cl_model,
+        cl_data,
+        coords_euclidean=("coord_x", "coord_y"),
+        cluster="cluster",
+        cvs=True,
+        backend="fallback",
+    )
     res_cl_auto = scpc(
         cl_model,
         cl_data,
         coords_euclidean=("coord_x", "coord_y"),
         cluster="cluster",
+        cvs=True,
         backend="auto",
     )
-    assert res_cl_auto.backend == "fallback"
-
-    # 2. Approximate large-n branch
-    model, data = make_small_ols_setup()
     if has_rust:
-        with pytest.raises(NotImplementedError, match="approximate"):
-            scpc(
-                model,
-                data,
-                coords_euclidean=("coord_x", "coord_y"),
-                method="approx",
-                backend="rust",
-            )
+        res_cl_rust = scpc(
+            cl_model,
+            cl_data,
+            coords_euclidean=("coord_x", "coord_y"),
+            cluster="cluster",
+            cvs=True,
+            backend="rust",
+        )
+        assert res_cl_auto.backend == "rust"
+        assert res_cl_rust.backend == "rust"
+        assert res_cl_rust.q == res_cl_fb.q
+        npt.assert_allclose(
+            res_cl_rust.scpcstats, res_cl_fb.scpcstats, rtol=1e-10, atol=1e-10
+        )
+        assert res_cl_rust.scpccvs is not None and res_cl_fb.scpccvs is not None
+        npt.assert_allclose(
+            res_cl_rust.scpccvs, res_cl_fb.scpccvs, rtol=1e-10, atol=1e-10
+        )
+    else:
+        assert res_cl_auto.backend == "fallback"
+
+    # 2. Approximate large-n branch now runs natively on Rust and matches fallback
+    model, data = make_small_ols_setup()
+    res_approx_fb = scpc(
+        model,
+        data,
+        coords_euclidean=("coord_x", "coord_y"),
+        method="approx",
+        cvs=True,
+        backend="fallback",
+    )
     res_approx_auto = scpc(
         model,
         data,
         coords_euclidean=("coord_x", "coord_y"),
         method="approx",
+        cvs=True,
         backend="auto",
     )
-    assert res_approx_auto.backend == "fallback"
+    assert res_approx_fb.method == "approx"
+    assert res_approx_auto.method == "approx"
+    if has_rust:
+        res_approx_ru = scpc(
+            model,
+            data,
+            coords_euclidean=("coord_x", "coord_y"),
+            method="approx",
+            cvs=True,
+            backend="rust",
+        )
+        assert res_approx_auto.backend == "rust"
+        assert res_approx_ru.backend == "rust"
+        assert res_approx_ru.method == "approx"
+        assert res_approx_ru.q == res_approx_fb.q
+        assert res_approx_ru.c0 == pytest.approx(res_approx_fb.c0, rel=1e-10, abs=1e-12)
+        assert res_approx_ru.cv == pytest.approx(res_approx_fb.cv, rel=1e-10, abs=1e-12)
+        npt.assert_allclose(
+            res_approx_ru.scpcstats, res_approx_fb.scpcstats, rtol=1e-10, atol=1e-10
+        )
+        assert res_approx_ru.scpccvs is not None and res_approx_fb.scpccvs is not None
+        npt.assert_allclose(
+            res_approx_ru.scpccvs, res_approx_fb.scpccvs, rtol=1e-10, atol=1e-10
+        )
+    else:
+        assert res_approx_auto.backend == "fallback"
 
-    # 3. Conditional AND unconditional IV
+    # 3. Conditional AND unconditional non-FE IV now run on Rust
     iv_data = make_basic_iv_data(2001)
     iv_fit = pf.feols("y ~ w | x ~ z", data=iv_data)
     for uncond_flag in (False, True):
-        if has_rust:
-            with pytest.raises(NotImplementedError, match="instrumental"):
-                scpc(
-                    iv_fit,
-                    iv_data,
-                    coords_euclidean=("coord_x", "coord_y"),
-                    uncond=uncond_flag,
-                    backend="rust",
-                )
+        res_iv_fb = scpc(
+            iv_fit,
+            iv_data,
+            coords_euclidean=("coord_x", "coord_y"),
+            avc=0.1,
+            uncond=uncond_flag,
+            cvs=True,
+            backend="fallback",
+        )
         res_iv_auto = scpc(
             iv_fit,
             iv_data,
             coords_euclidean=("coord_x", "coord_y"),
+            avc=0.1,
             uncond=uncond_flag,
+            cvs=True,
             backend="auto",
         )
-        assert res_iv_auto.backend == "fallback"
+        if has_rust:
+            assert res_iv_auto.backend == "rust"
+            assert res_iv_auto.q == res_iv_fb.q
+            npt.assert_allclose(
+                res_iv_auto.scpcstats, res_iv_fb.scpcstats, rtol=1e-10, atol=1e-10
+            )
+        else:
+            assert res_iv_auto.backend == "fallback"
 
-    # 4. Conditional AND unconditional absorbed FE
+    # 4. 1-way FE OLS runs on Rust; 2-way FE IV falls back conditionally and runs unconditionally
     fe_data = pd.DataFrame(
         {
             "y": [1.0, 2.2, 2.9, 4.3, 4.9, 6.2],
@@ -1046,23 +1106,77 @@ def test_unsupported_modes_raise_on_rust_and_fallback_on_auto(
     )
     fe_fit = pf.feols("y ~ x | fe", data=fe_data)
     for uncond_flag in (False, True):
-        if has_rust:
-            with pytest.raises(NotImplementedError, match="absorbed fixed-effect"):
-                scpc(
-                    fe_fit,
-                    fe_data,
-                    coords_euclidean=("coord_x", "coord_y"),
-                    uncond=uncond_flag,
-                    backend="rust",
-                )
+        res_fe_fb = scpc(
+            fe_fit,
+            fe_data,
+            coords_euclidean=("coord_x", "coord_y"),
+            uncond=uncond_flag,
+            cvs=True,
+            backend="fallback",
+        )
         res_fe_auto = scpc(
             fe_fit,
             fe_data,
             coords_euclidean=("coord_x", "coord_y"),
             uncond=uncond_flag,
+            cvs=True,
             backend="auto",
         )
-        assert res_fe_auto.backend == "fallback"
+        if has_rust:
+            assert res_fe_auto.backend == "rust"
+            npt.assert_allclose(
+                res_fe_auto.scpcstats, res_fe_fb.scpcstats, rtol=1e-10, atol=1e-10
+            )
+        else:
+            assert res_fe_auto.backend == "fallback"
+
+    iv_2way_data = make_two_way_fe_iv_data(2005)
+    iv_2way_fit = pf.feols("y ~ w | fe1 + fe2 | x ~ z", data=iv_2way_data)
+    if has_rust:
+        with pytest.raises(
+            NotImplementedError, match="multi-way absorbed fixed-effect"
+        ):
+            scpc(
+                iv_2way_fit,
+                iv_2way_data,
+                coords_euclidean=("coord_x", "coord_y"),
+                avc=0.1,
+                uncond=False,
+                backend="rust",
+            )
+    res_2way_auto = scpc(
+        iv_2way_fit,
+        iv_2way_data,
+        coords_euclidean=("coord_x", "coord_y"),
+        avc=0.1,
+        uncond=False,
+        backend="auto",
+    )
+    assert res_2way_auto.backend == "fallback"
+    if has_rust:
+        res_2way_uncond = scpc(
+            iv_2way_fit,
+            iv_2way_data,
+            coords_euclidean=("coord_x", "coord_y"),
+            avc=0.1,
+            uncond=True,
+            backend="rust",
+        )
+        res_2way_uncond_fb = scpc(
+            iv_2way_fit,
+            iv_2way_data,
+            coords_euclidean=("coord_x", "coord_y"),
+            avc=0.1,
+            uncond=True,
+            backend="fallback",
+        )
+        assert res_2way_uncond.backend == "rust"
+        npt.assert_allclose(
+            res_2way_uncond.scpcstats,
+            res_2way_uncond_fb.scpcstats,
+            rtol=1e-10,
+            atol=1e-10,
+        )
 
     # 5. Weighted OLS (statsmodels WLS/GLS/GLM and pyfixest weighted OLS)
     w_data = pd.DataFrame(
@@ -1206,3 +1320,350 @@ def test_1d_coords_ncoef_and_tied_eigenvalues(
         )
         assert res20_rust.backend == "rust"
         assert res20_rust.tied is True
+
+
+@pytest.mark.parametrize("engine", ["statsmodels", "pyfixest"])
+@pytest.mark.parametrize(
+    ("formula", "cutoff"), [("y ~ x", 17.380977), ("y ~ x - 1", 9.902023)]
+)
+def test_clustered_conditional_ols_cutoffs_and_bench_200_parity(
+    engine: str, formula: str, cutoff: float
+) -> None:
+    sites = pd.DataFrame(
+        {"s": [0.0, 1.0, 2.0, 4.0, 6.0], "x0": [-1.0, -4.0, 2.0, 2.0, 1.0]}
+    )
+    rows = []
+    for _, r in sites.iterrows():
+        for delta in (-0.25, 0.25):
+            x_val = r["x0"] + delta
+            rows.append({"s": r["s"], "x": x_val, "y": x_val + float(r["s"] == 0.0)})
+    cl_df = pd.DataFrame(rows)
+    fit = (
+        smf.ols(formula, data=cl_df).fit()
+        if engine == "statsmodels"
+        else pf.feols(formula, data=cl_df)
+    )
+
+    backends = ("fallback", "rust") if rust_available() else ("fallback",)
+    results = {}
+    for bk in backends:
+        res = scpc(
+            fit,
+            cl_df,
+            coords_euclidean=("s",),
+            cluster="s",
+            avc=0.5,
+            uncond=False,
+            cvs=True,
+            backend=bk,
+        )
+        assert res.backend == bk
+        assert res.scpccvs is not None
+        x_idx = res.coef_names.index("x")
+        assert abs(float(res.scpccvs[x_idx, 2]) - cutoff) < 0.002
+        results[bk] = res
+
+    if "rust" in results:
+        npt.assert_allclose(
+            results["rust"].scpcstats,
+            results["fallback"].scpcstats,
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        assert (
+            results["rust"].scpccvs is not None
+            and results["fallback"].scpccvs is not None
+        )
+        npt.assert_allclose(
+            results["rust"].scpccvs,
+            results["fallback"].scpccvs,
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
+
+@pytest.mark.skipif(not HAS_MONOREPO_FIXTURES, reason="monorepo fixtures not available")
+@pytest.mark.parametrize("uncond", [False, True])
+@pytest.mark.parametrize("latlong", [False, True])
+def test_clustered_ols_bench_200_rust_vs_fallback_parity(
+    uncond: bool, latlong: bool
+) -> None:
+    df = load_bench_df("bench_200.csv")
+    coord_kwargs: dict[str, Any] = (
+        {"lon": "s_1_clustered", "lat": "s_2_clustered"}
+        if latlong
+        else {"coords_euclidean": ("s_1_clustered", "s_2_clustered")}
+    )
+    for fit in (
+        smf.ols("y ~ x1 + x2", data=df).fit(),
+        pf.feols("y ~ x1 + x2", data=df),
+    ):
+        res_fb = scpc(
+            fit,
+            df,
+            cluster="cluster_id",
+            avc=0.03,
+            uncond=uncond,
+            cvs=True,
+            backend="fallback",
+            **coord_kwargs,
+        )
+        assert res_fb.backend == "fallback"
+        if rust_available():
+            res_ru = scpc(
+                fit,
+                df,
+                cluster="cluster_id",
+                avc=0.03,
+                uncond=uncond,
+                cvs=True,
+                backend="rust",
+                **coord_kwargs,
+            )
+            assert res_ru.backend == "rust"
+            assert res_ru.q == res_fb.q
+            assert res_ru.c0 == pytest.approx(res_fb.c0, rel=1e-10, abs=1e-12)
+            assert res_ru.cv == pytest.approx(res_fb.cv, rel=1e-10, abs=1e-12)
+            npt.assert_allclose(
+                res_ru.scpcstats, res_fb.scpcstats, rtol=1e-10, atol=1e-10
+            )
+            assert res_ru.scpccvs is not None and res_fb.scpccvs is not None
+            npt.assert_allclose(res_ru.scpccvs, res_fb.scpccvs, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize(
+    ("case_name", "formula", "cluster"),
+    [
+        ("iv_basic", "y ~ w | x ~ z", None),
+        ("iv_1way_fe", "y ~ w | fe | x ~ z", None),
+        ("iv_clustered", "y ~ w | x ~ z", "cl"),
+        ("iv_1way_fe_clustered", "y ~ w | fe | x ~ z", "cl"),
+    ],
+)
+@pytest.mark.parametrize("uncond", [False, True])
+def test_iv_and_one_way_fe_rust_vs_fallback_parity(
+    case_name: str, formula: str, cluster: str | None, uncond: bool
+) -> None:
+    if case_name == "iv_basic":
+        df = make_basic_iv_data(2001)
+    elif case_name == "iv_1way_fe":
+        df = make_one_way_fe_iv_data(2002)
+    elif case_name == "iv_clustered":
+        df = make_clustered_iv_data(2003)
+    else:
+        df = make_clustered_fe_iv_data(2004)
+
+    fit = pf.feols(formula, data=df)
+    res_fb = scpc(
+        fit,
+        df,
+        coords_euclidean=("coord_x", "coord_y"),
+        cluster=cluster,
+        avc=0.1,
+        uncond=uncond,
+        cvs=True,
+        backend="fallback",
+    )
+    assert res_fb.backend == "fallback"
+    if rust_available():
+        res_ru = scpc(
+            fit,
+            df,
+            coords_euclidean=("coord_x", "coord_y"),
+            cluster=cluster,
+            avc=0.1,
+            uncond=uncond,
+            cvs=True,
+            backend="rust",
+        )
+        assert res_ru.backend == "rust"
+        assert res_ru.q == res_fb.q
+        assert res_ru.c0 == pytest.approx(res_fb.c0, rel=1e-10, abs=1e-12)
+        assert res_ru.cv == pytest.approx(res_fb.cv, rel=1e-10, abs=1e-12)
+        npt.assert_allclose(res_ru.scpcstats, res_fb.scpcstats, rtol=1e-10, atol=1e-10)
+        assert res_ru.scpccvs is not None and res_fb.scpccvs is not None
+        npt.assert_allclose(res_ru.scpccvs, res_fb.scpccvs, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize("latlong", [False, True])
+@pytest.mark.parametrize("uncond", [False, True])
+def test_approx_scpc_bench_200_ols_parity_and_threads(
+    latlong: bool, uncond: bool
+) -> None:
+    df = load_bench_df("bench_200.csv")
+    fit = smf.ols("y ~ x1 + x2", data=df).fit()
+    coord_kwargs: dict[str, Any] = (
+        {"lon": "s_1", "lat": "s_2"}
+        if latlong
+        else {"coords_euclidean": ("s_1", "s_2")}
+    )
+
+    res_fb = scpc(
+        fit,
+        df,
+        **coord_kwargs,
+        avc=0.05,
+        method="approx",
+        large_n_seed=7,
+        uncond=uncond,
+        cvs=True,
+        backend="fallback",
+    )
+    assert res_fb.backend == "fallback"
+    assert res_fb.method == "approx"
+    assert res_fb.large_n_seed == 7
+    if rust_available():
+        res_1 = scpc(
+            fit,
+            df,
+            **coord_kwargs,
+            avc=0.05,
+            method="approx",
+            large_n_seed=7,
+            uncond=uncond,
+            cvs=True,
+            backend="rust",
+            nthreads=1,
+        )
+        res_2 = scpc(
+            fit,
+            df,
+            **coord_kwargs,
+            avc=0.05,
+            method="approx",
+            large_n_seed=7,
+            uncond=uncond,
+            cvs=True,
+            backend="rust",
+            nthreads=2,
+        )
+        assert res_1.backend == "rust"
+        assert res_1.method == "approx"
+        assert res_1.q == res_fb.q
+        assert res_1.c0 == pytest.approx(res_fb.c0, rel=1e-10, abs=1e-12)
+        assert res_1.cv == pytest.approx(res_fb.cv, rel=1e-10, abs=1e-12)
+        npt.assert_allclose(res_1.scpcstats, res_fb.scpcstats, rtol=1e-10, atol=1e-10)
+        assert (
+            res_1.scpccvs is not None
+            and res_2.scpccvs is not None
+            and res_fb.scpccvs is not None
+        )
+        npt.assert_allclose(res_1.scpccvs, res_fb.scpccvs, rtol=1e-10, atol=1e-10)
+        npt.assert_allclose(res_1.scpcstats, res_2.scpcstats, rtol=1e-13, atol=1e-13)
+        npt.assert_allclose(res_1.scpccvs, res_2.scpccvs, rtol=1e-13, atol=1e-13)
+
+
+@pytest.mark.parametrize(
+    ("formula", "cluster"),
+    [
+        ("y ~ w | x ~ z", None),
+        ("y ~ w | fe | x ~ z", None),
+        ("y ~ w | x ~ z", "cl"),
+        ("y ~ w | fe | x ~ z", "cl"),
+    ],
+)
+@pytest.mark.parametrize("uncond", [False, True])
+def test_approx_scpc_pyfixest_iv_and_cluster_parity(
+    formula: str, cluster: str | None, uncond: bool
+) -> None:
+    pf = pytest.importorskip("pyfixest")
+    df = make_clustered_fe_iv_data(2004)
+    fit = pf.feols(formula, data=df)
+
+    res_fb = scpc(
+        fit,
+        df,
+        coords_euclidean=("coord_x", "coord_y"),
+        cluster=cluster,
+        avc=0.1,
+        method="approx",
+        large_n_seed=3,
+        uncond=uncond,
+        cvs=True,
+        backend="fallback",
+    )
+    assert res_fb.backend == "fallback"
+    assert res_fb.method == "approx"
+    if rust_available():
+        res_ru = scpc(
+            fit,
+            df,
+            coords_euclidean=("coord_x", "coord_y"),
+            cluster=cluster,
+            avc=0.1,
+            method="approx",
+            large_n_seed=3,
+            uncond=uncond,
+            cvs=True,
+            backend="rust",
+        )
+        assert res_ru.backend == "rust"
+        assert res_ru.method == "approx"
+        assert res_ru.q == res_fb.q
+        assert res_ru.c0 == pytest.approx(res_fb.c0, rel=1e-10, abs=1e-12)
+        assert res_ru.cv == pytest.approx(res_fb.cv, rel=1e-10, abs=1e-12)
+        npt.assert_allclose(res_ru.scpcstats, res_fb.scpcstats, rtol=1e-10, atol=1e-10)
+        assert res_ru.scpccvs is not None and res_fb.scpccvs is not None
+        npt.assert_allclose(res_ru.scpccvs, res_fb.scpccvs, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.skipif(not rust_available(), reason="spatial_spur_rust not installed")
+def test_approx_threshold_override_and_tied_auto_fallback() -> None:
+    # n = 4500 triggers approx under auto, while explicit exact overrides the threshold.
+    rng = np.random.default_rng(2026)
+    n_big = 4500
+    s1 = rng.uniform(0.0, 1.0, size=n_big)
+    s2 = rng.uniform(0.0, 1.0, size=n_big)
+    x = rng.normal(size=n_big)
+    y = 0.5 + 1.2 * x + rng.normal(scale=0.5, size=n_big)
+    df_big = pd.DataFrame({"y": y, "x": x, "s_1": s1, "s_2": s2})
+    fit_big = smf.ols("y ~ x", data=df_big).fit()
+
+    res_auto = scpc(
+        fit_big,
+        df_big,
+        coords_euclidean=("s_1", "s_2"),
+        method="auto",
+        backend="rust",
+    )
+    assert res_auto.backend == "rust"
+    assert res_auto.method == "approx"
+
+    res_exact = scpc(
+        fit_big,
+        df_big,
+        coords_euclidean=("s_1", "s_2"),
+        method="exact",
+        backend="rust",
+    )
+    assert res_exact.backend == "rust"
+    assert res_exact.method == "exact"
+
+    # Tied/degenerate landmark eigenspace in approx falls back cleanly under auto.
+    n_tie = 20
+    s1_tie = np.concatenate([np.zeros(10), np.ones(10)])
+    s2_tie = np.zeros(n_tie)
+    x_tie = rng.normal(size=n_tie)
+    y_tie = 1.0 + x_tie + rng.normal(size=n_tie)
+    df_tie = pd.DataFrame({"y": y_tie, "x": x_tie, "s1": s1_tie, "s2": s2_tie})
+    fit_tie = smf.ols("y ~ x", data=df_tie).fit()
+
+    with pytest.raises(RuntimeError, match="tied eigenspace"):
+        scpc(
+            fit_tie,
+            df_tie,
+            coords_euclidean=("s1", "s2"),
+            avc=0.5,
+            method="approx",
+            backend="rust",
+        )
+    res_tie_auto = scpc(
+        fit_tie,
+        df_tie,
+        coords_euclidean=("s1", "s2"),
+        avc=0.5,
+        method="approx",
+        backend="auto",
+    )
+    assert res_tie_auto.backend == "fallback"
+    assert res_tie_auto.method == "approx"

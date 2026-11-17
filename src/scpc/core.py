@@ -18,6 +18,7 @@ from .utils.data import (
     get_coef_names,
     get_conditional_projection_setup,
     get_fixest_bread_inv,
+    get_fixest_iv_design,
     get_fixest_score_matrix,
     get_obs_index,
     get_scpc_model_matrix,
@@ -25,6 +26,7 @@ from .utils.data import (
     is_fixest_iv_second_stage,
     is_pyfixest_model,
     is_pyfixest_multi,
+    make_pyfixest_demeaner,
     resolve_coords_input,
 )
 from .utils.matrix import (
@@ -34,18 +36,22 @@ from .utils.matrix import (
     orthogonalize_w_iv,
 )
 from .utils.spatial import (
+    LARGE_N_CAPM,
+    LARGE_N_CAPN,
+    LARGE_N_M,
     LARGE_N_THRESHOLD,
     get_cv,
     get_oms,
     lnget_oms,
     max_rp,
+    normalize_s,
     set_oms_wfin,
     validate_large_n_seed,
     validate_scpc_method,
 )
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
-RUST_API_VERSION = 2
+RUST_API_VERSION = 5
 
 
 def resolve_backend(backend: object) -> str:
@@ -140,6 +146,25 @@ def compute_orthogonal_projector(
         return None, None
     proj = np.ascontiguousarray(u[:, keep], dtype=np.float64)
     return proj, proj
+
+
+def compute_iv_projector(
+    x_iv: MatrixLike,
+    z_iv: MatrixLike,
+    *,
+    tol: float = 1e-10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute oblique `(U, V)` factors for `A -> A - X (X' P_Z X)^{-1} X' P_Z A`."""
+    x = np.asarray(x_iv, dtype=np.float64)
+    z = np.asarray(z_iv, dtype=np.float64)
+    qz, _ = np.linalg.qr(z, mode="reduced")
+    pzx = qz @ (qz.T @ x)
+    gram = x.T @ pzx
+    if np.linalg.matrix_rank(gram, tol=tol) < gram.shape[1]:
+        raise ValueError("IV residualizer is rank deficient: X'P_ZX is not full rank.")
+    proj_u = np.ascontiguousarray(x, dtype=np.float64)
+    proj_v = np.ascontiguousarray(np.linalg.solve(gram, pzx.T).T, dtype=np.float64)
+    return proj_u, proj_v
 
 
 def scpc(
@@ -305,12 +330,33 @@ def scpc(
     k_use = p if ncoef is None else min(ncoef, p)
     coef_names = raw_coef_names[:k_use]
 
-    is_m1_exact = (
-        method != "approx"
-        and (method == "exact" or neff < LARGE_N_THRESHOLD)
-        and cluster is None
-        and not model_has_fe
-        and not model_is_iv
+    fe_id_0based: np.ndarray | None = None
+    fe_multiway = False
+    if model_has_fe and model_is_iv and not uncond:
+        fe_raw = getattr(model, "_fe", None)
+        if fe_raw is None:
+            fe_multiway = True
+        else:
+            fe_arr = np.asarray(fe_raw)
+            if fe_arr.ndim == 1:
+                _, fe_inv = np.unique(fe_arr, return_inverse=True)
+                fe_id_0based = np.ascontiguousarray(fe_inv, dtype=np.int64)
+            elif fe_arr.ndim == 2 and fe_arr.shape[1] == 1:
+                _, fe_inv = np.unique(fe_arr[:, 0], return_inverse=True)
+                fe_id_0based = np.ascontiguousarray(fe_inv, dtype=np.int64)
+            elif fe_arr.ndim == 2 and fe_arr.shape[1] == 0:
+                fe_id_0based = None
+            else:
+                fe_multiway = True
+
+    method_actual = (
+        "approx"
+        if (method == "approx" or (method == "auto" and neff >= LARGE_N_THRESHOLD))
+        else "exact"
+    )
+    is_rust_eligible = (
+        method_actual in {"exact", "approx"}
+        and not fe_multiway
         and not model_is_weighted
         and k_use >= 1
     )
@@ -323,66 +369,175 @@ def scpc(
                     "Rust backend requested (`backend='rust'`), but "
                     f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is not installed."
                 )
-            if not is_m1_exact:
+            if not is_rust_eligible:
                 reasons: list[str] = []
-                if method == "approx" or (
-                    method == "auto" and neff >= LARGE_N_THRESHOLD
-                ):
-                    reasons.append("approximate large-n method")
-                if cluster is not None:
-                    reasons.append("clustered inference")
-                if model_has_fe:
-                    reasons.append("absorbed fixed-effect demeaning")
-                if model_is_iv:
-                    reasons.append("instrumental variables")
+                if fe_multiway:
+                    reasons.append("multi-way absorbed fixed-effect IV demeaning")
                 if model_is_weighted:
                     reasons.append("weighted or non-OLS models")
                 if k_use < 1:
                     reasons.append("non-positive ncoef")
                 raise NotImplementedError(
-                    "Rust backend does not support "
-                    + ", ".join(reasons)
-                    + " in Milestone 1."
+                    "Rust backend does not support " + ", ".join(reasons) + " yet."
                 )
 
-        if rust_mod is not None and is_m1_exact:
-            coords_mat = np.ascontiguousarray(coords, dtype=np.float64)
+        if rust_mod is not None and is_rust_eligible:
             coef_use = np.ascontiguousarray(coef[:k_use], dtype=np.float64)
             wj_mat = np.ascontiguousarray(
                 neff * (s @ bread_inv[:k_use, :].T) + coef_use[None, :],
                 dtype=np.float64,
             )
             if uncond:
-                xj_mat = None
-                xjs_mat = None
+                rust_xj = None
+                rust_xjs = None
                 proj_u = None
                 proj_v = None
+                cl_arg = None
+                fe_arg = None
             else:
                 xj_mat = np.ascontiguousarray(
                     neff * (model_mat_cond @ bread_inv[:k_use, :].T),
                     dtype=np.float64,
                 )
-                xjs_mat = np.ascontiguousarray(np.sign(xj_mat), dtype=np.float64)
-                proj_u, proj_v = compute_orthogonal_projector(
-                    model_mat_cond,
-                    include_intercept=cond_include_intercept,
+                if cluster is not None:
+                    if cl_idx is None:
+                        raise ValueError(
+                            "Internal error: clustered SCPC is missing cluster indices."
+                        )
+                    xj_sq_sum = np.zeros((neff, k_use), dtype=np.float64)
+                    np.add.at(xj_sq_sum, cl_idx, xj_mat**2)
+                    cl_denom = np.sqrt(xj_sq_sum[cl_idx, :])
+                    xjs_mat = np.ascontiguousarray(
+                        np.divide(
+                            xj_mat,
+                            cl_denom,
+                            out=np.zeros_like(xj_mat),
+                            where=cl_denom > 0.0,
+                        ),
+                        dtype=np.float64,
+                    )
+                    cl_arg = np.ascontiguousarray(cl_idx, dtype=np.int64)
+                else:
+                    xjs_mat = np.ascontiguousarray(np.sign(xj_mat), dtype=np.float64)
+                    cl_arg = None
+
+                if model_is_iv:
+                    design = get_fixest_iv_design(model)
+                    x_iv = np.asarray(design["X"], dtype=np.float64)
+                    z_iv = np.asarray(design["Z"], dtype=np.float64)
+                    if model_has_fe:
+                        demean = make_pyfixest_demeaner(model)
+                        x_iv = np.asarray(
+                            demean(x_iv, context="IV residualizer X"),
+                            dtype=np.float64,
+                        )
+                        z_iv = np.asarray(
+                            demean(z_iv, context="IV residualizer Z"),
+                            dtype=np.float64,
+                        )
+                        fe_arg = fe_id_0based
+                    else:
+                        fe_arg = None
+                    proj_u, proj_v = compute_iv_projector(x_iv, z_iv)
+                    rust_xj = xjs_mat
+                    rust_xjs = xj_mat
+                else:
+                    fe_arg = None
+                    proj_u, proj_v = compute_orthogonal_projector(
+                        model_mat_cond,
+                        include_intercept=cond_include_intercept,
+                    )
+                    rust_xj = xj_mat
+                    rust_xjs = xjs_mat
+
+            if method_actual == "approx":
+                coords_norm, perm = normalize_s(coords, latlong)
+                perm_idx = np.asarray(perm, dtype=np.int64)
+                coords_mat = np.ascontiguousarray(coords_norm, dtype=np.float64)
+                wj_mat = np.ascontiguousarray(wj_mat[perm_idx, :], dtype=np.float64)
+                if not uncond:
+                    if cluster is not None and cl_arg is not None:
+                        inv_perm = np.empty(len(perm_idx), dtype=np.int64)
+                        inv_perm[perm_idx] = np.arange(len(perm_idx), dtype=np.int64)
+                        cl_arg = np.ascontiguousarray(inv_perm[cl_arg], dtype=np.int64)
+                    else:
+                        rust_xj = (
+                            None
+                            if rust_xj is None
+                            else np.ascontiguousarray(
+                                rust_xj[perm_idx, :], dtype=np.float64
+                            )
+                        )
+                        rust_xjs = (
+                            None
+                            if rust_xjs is None
+                            else np.ascontiguousarray(
+                                rust_xjs[perm_idx, :], dtype=np.float64
+                            )
+                        )
+                        if proj_u is not None:
+                            proj_u = np.ascontiguousarray(
+                                proj_u[perm_idx, :], dtype=np.float64
+                            )
+                        if proj_v is not None:
+                            proj_v = np.ascontiguousarray(
+                                proj_v[perm_idx, :], dtype=np.float64
+                            )
+                        if fe_arg is not None:
+                            fe_arg = np.ascontiguousarray(
+                                fe_arg[perm_idx], dtype=np.int64
+                            )
+                try:
+                    rust_res = rust_mod.run_approx_scpc(
+                        coords_mat,
+                        coef_use,
+                        wj_mat,
+                        float(avc),
+                        latlong=bool(latlong),
+                        uncond=bool(uncond),
+                        cvs=bool(cvs),
+                        xj=rust_xj,
+                        xjs=rust_xjs,
+                        proj_u=proj_u,
+                        proj_v=proj_v,
+                        nthreads=resolved_nthreads,
+                        cluster_id=cl_arg,
+                        fe_id=fe_arg,
+                        seed=int(large_n_seed),
+                        landmarks=LARGE_N_M,
+                        samples=LARGE_N_CAPN,
+                        pair_count=LARGE_N_CAPM,
+                    )
+                except RuntimeError as exc:
+                    if (
+                        "tied eigenspace" in str(exc).lower()
+                        and resolved_backend == "auto"
+                    ):
+                        rust_res = None
+                    else:
+                        raise
+            else:
+                coords_mat = np.ascontiguousarray(coords, dtype=np.float64)
+                rust_res = rust_mod.run_exact_scpc(
+                    coords_mat,
+                    coef_use,
+                    wj_mat,
+                    float(avc),
+                    latlong=bool(latlong),
+                    uncond=bool(uncond),
+                    cvs=bool(cvs),
+                    xj=rust_xj,
+                    xjs=rust_xjs,
+                    proj_u=proj_u,
+                    proj_v=proj_v,
+                    nthreads=resolved_nthreads,
+                    cluster_id=cl_arg,
+                    fe_id=fe_arg,
                 )
 
-            rust_res = rust_mod.run_exact_scpc(
-                coords_mat,
-                coef_use,
-                wj_mat,
-                float(avc),
-                latlong=bool(latlong),
-                uncond=bool(uncond),
-                cvs=bool(cvs),
-                xj=xj_mat,
-                xjs=xjs_mat,
-                proj_u=proj_u,
-                proj_v=proj_v,
-                nthreads=resolved_nthreads,
-            )
-            if not (rust_res["tied"] and resolved_backend == "auto"):
+            if rust_res is not None and not (
+                rust_res["tied"] and resolved_backend == "auto"
+            ):
                 return SCPCResult(
                     scpcstats=np.asarray(rust_res["scpcstats"], dtype=float),
                     scpccvs=None
@@ -394,7 +549,7 @@ def scpc(
                     cv=float(rust_res["cv"]),
                     q=int(rust_res["q"]),
                     coef_names=coef_names,
-                    method="exact",
+                    method=method_actual,
                     large_n_seed=large_n_seed,
                     backend="rust",
                     tied=bool(rust_res["tied"]),
@@ -419,6 +574,29 @@ def scpc(
     perm = np.asarray(spc.perm, dtype=int)
     q = wfin.shape[1] - 1
     large_n_random_state = spc.random_state
+
+    cond_residualize_use = cond_residualize
+    cond_fixef_id_use = cond_fixef_id
+    if (
+        not uncond
+        and cluster is None
+        and not np.array_equal(perm, np.arange(len(perm), dtype=int))
+    ):
+        inv_perm = np.empty(len(perm), dtype=int)
+        inv_perm[perm] = np.arange(len(perm), dtype=int)
+        if cond_residualize is not None:
+            base_resid = cond_residualize
+
+            def _permuted_resid(mat: MatrixLike) -> np.ndarray:
+                arr = np.asarray(mat, dtype=float)
+                return np.asarray(base_resid(arr[inv_perm, ...]), dtype=float)[
+                    perm, ...
+                ]
+
+            cond_residualize_use = _permuted_resid
+        if cond_fixef_id is not None:
+            fe_arr = np.asarray(cond_fixef_id)
+            cond_fixef_id_use = fe_arr[perm, ...] if fe_arr.ndim > 1 else fe_arr[perm]
 
     out = np.full((k_use, 6), np.nan)
     levs = np.array([0.32, 0.10, 0.05, 0.01], dtype=float)
@@ -490,7 +668,7 @@ def scpc(
                         wfin,
                         xj,
                         xjs,
-                        residualize=cond_residualize,
+                        residualize=cond_residualize_use,
                     )
                 else:
                     wx = orthogonalize_w(
@@ -499,7 +677,7 @@ def scpc(
                         xjs,
                         model_mat_cond[perm, :],
                         include_intercept=cond_include_intercept,
-                        fixef_id=cond_fixef_id,
+                        fixef_id=cond_fixef_id_use,
                     )
 
             if spc.large_n:

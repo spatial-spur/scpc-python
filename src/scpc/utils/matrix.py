@@ -464,6 +464,22 @@ def orthogonalize_w_cluster(
     )
 
     if ncol_w > 1:
+        # Conditional clustered OLS denominator weights are Xi_s' M_V Xi B_q.
+        pre_max = float(
+            np.max(
+                np.sqrt(
+                    np.sum(
+                        (w_indiv[:, 1:] * xj_indiv[:, None]) ** 2,
+                        axis=0,
+                    )
+                )
+            )
+        )
+        if not math.isfinite(pre_max) or pre_max == 0.0:
+            raise ValueError(
+                "Conditional projection collapsed all non-constant W columns."
+            )
+
         x = np.asarray(model_mat_indiv, dtype=float)
         has_intercept_col = (
             hasattr(model_mat_indiv, "columns")
@@ -479,6 +495,14 @@ def orthogonalize_w_cluster(
                 cl_idx,
                 weights=resid_col * xjs_indiv,
                 minlength=nclust,
+            )
+
+        post_norms = np.linalg.norm(wx[:, 1:], axis=0)
+        if not np.isfinite(post_norms).all() or bool(
+            np.all(post_norms <= 1e-12 * pre_max)
+        ):
+            raise ValueError(
+                "Conditional projection collapsed all non-constant W columns."
             )
 
     return wx

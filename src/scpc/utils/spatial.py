@@ -154,7 +154,7 @@ def next_u(random_t: int) -> tuple[float, int]:
 
 
 def jumble_s(s: MatrixLike, m: int, random_t: int) -> tuple[MatrixLike, int]:
-    """Randomly jumble the first `m` rows of the coordinate matrix."""
+    """Randomly jumble the first `m` rows of the coordinate matrix without replacement."""
     s = np.array(s, dtype=float, copy=True)
     if s.ndim == 1:
         s = s.reshape(-1, 1)
@@ -162,10 +162,11 @@ def jumble_s(s: MatrixLike, m: int, random_t: int) -> tuple[MatrixLike, int]:
     n = s.shape[0]
     for i in range(m):
         _, random_t = next_u(random_t)
-        j = int((random_t * n) // UINT32_MOD)
-        tmp = s[j, :].copy()
-        s[j, :] = s[i, :]
-        s[i, :] = tmp
+        j = i + int((random_t * (n - i)) // UINT32_MOD)
+        if j != i:
+            tmp = s[j, :].copy()
+            s[j, :] = s[i, :]
+            s[i, :] = tmp
     return s, random_t
 
 
@@ -226,8 +227,8 @@ def lnset_wc0(
         w0 = ln_subset_evecs(distmat, c0, qmax)
         wx = np.zeros((n, qmax), dtype=float)
         for j in range(m):
-            # this is the same nystrom-style extension used in the r/stata branch.
-            v = np.exp(-c0 * np.sqrt(np.sum((s - subset[j, :]) ** 2, axis=1)))
+            d_cross = get_distvec(s, np.broadcast_to(subset[j, :], s.shape), latlong)
+            v = np.exp(-c0 * d_cross)
             wx = wx + np.outer(v, w0[j, :])
         wx = wx - np.mean(wx, axis=0, keepdims=True)
         norms = np.sqrt(np.sum(wx**2, axis=0))
@@ -288,10 +289,11 @@ def lnget_oms(
     w1 = w[inds[:capM], :]
     w2 = w[inds[1 : capM + 1], :]
 
+    gram = w.T @ w
     c = c0
     for i in range(nc):
         cd = np.exp(-c * dist)
-        oms[i] = np.eye(w.shape[1]) + 0.5 * (n * (n - 1) / capM) * (
+        oms[i] = gram + 0.5 * (n * (n - 1) / capM) * (
             w1.T @ (w2 * cd[:, None]) + w2.T @ (w1 * cd[:, None])
         )
         c = c * cgridfac
@@ -786,8 +788,9 @@ def set_oms_wfin(
     random_t: int | None = None
     tied = False
 
+    q_limit = (min(LARGE_N_M, n) - 1) if method_actual == "approx" else (n - 1)
     while True:
-        qmax = min(qmax, n - 1)
+        qmax = min(qmax, q_limit)
 
         if method_actual == "exact":
             distmat = get_distmat(coords, latlong)
@@ -828,7 +831,7 @@ def set_oms_wfin(
             tied = False
 
         wfin, cvfin, q = set_final_w(oms, w, qmax)
-        if q < qmax or qmax == n - 1:
+        if q < qmax or qmax >= q_limit:
             break
         qmax = round(qmax + qmax / 2)
 
