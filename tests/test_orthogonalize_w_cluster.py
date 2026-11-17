@@ -4,11 +4,42 @@ import math
 
 import numpy as np
 import numpy.testing as npt
+import pandas as pd
 import pytest
+import statsmodels.formula.api as smf
 
+from scpc import scpc
 from scpc.utils.matrix import orthogonalize_w_cluster
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
+
+
+@pytest.mark.parametrize(
+    ("formula", "cutoff"), [("y ~ x", 17.380977), ("y ~ x - 1", 9.902023)]
+)
+def test_clustered_ols_cutoff_uses_normalized_weights_after_projection(
+    formula: str, cutoff: float
+) -> None:
+    data = pd.DataFrame(
+        {
+            "s": np.repeat([0, 1, 2, 4, 6], 2),
+            "x": np.repeat([-1, -4, 2, 2, 1], 2) + np.tile([-0.25, 0.25], 5),
+        }
+    )
+    data["y"] = data["x"] + (data["s"] == 0)
+    result = scpc(
+        smf.ols(formula, data=data).fit(),
+        data,
+        coords_euclidean=["s"],
+        cluster="s",
+        avc=0.5,
+        cvs=True,
+        backend="fallback",
+    )
+    assert result.scpccvs is not None
+    assert result.scpccvs[result.coef_names.index("x"), 2] == pytest.approx(
+        cutoff, abs=0.002
+    )
 
 
 def test_orthogonalize_w_cluster_leaves_the_simple_cluster_basis_unchanged() -> None:

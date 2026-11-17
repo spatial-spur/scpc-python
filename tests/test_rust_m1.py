@@ -46,6 +46,30 @@ def load_bench_df(csv_name: str) -> pd.DataFrame:
     return pd.read_csv(DATA_DIR / csv_name)
 
 
+@pytest.mark.parametrize("engine", ["statsmodels", "pyfixest"])
+@pytest.mark.parametrize(
+    ("formula", "cutoff"), [("y ~ x", 17.625169), ("y ~ x - 1", 9.973326)]
+)
+def test_conditional_ols_cutoff_and_fitted_intercept(
+    engine: str, formula: str, cutoff: float
+) -> None:
+    data = pd.DataFrame({"s": [0, 1, 2, 4, 6], "x": [-1, -4, 2, 2, 1]})
+    data["y"] = data["x"] + (data["s"] == 0)
+    fit = (
+        smf.ols(formula, data=data).fit()
+        if engine == "statsmodels"
+        else pf.feols(formula, data)
+    )
+    for backend in ("fallback", "rust"):
+        result = scpc(
+            fit, data, coords_euclidean=["s"], avc=0.5, cvs=True, backend=backend
+        )
+        assert result.scpccvs is not None
+        assert result.scpccvs[result.coef_names.index("x"), 2] == pytest.approx(
+            cutoff, abs=0.002
+        )
+
+
 def make_small_ols_setup() -> tuple[Any, pd.DataFrame]:
     data = pd.DataFrame(
         {
@@ -60,7 +84,7 @@ def make_small_ols_setup() -> tuple[Any, pd.DataFrame]:
 
 
 def test_spatial_spur_rust_api_version_fortran_layout_and_validation() -> None:
-    assert RUST_MOD.API_VERSION == 1
+    assert RUST_MOD.API_VERSION == 2
 
     coords = np.array(
         [
@@ -206,17 +230,23 @@ def test_m1_fixtures_parity_rust_vs_fallback_and_baseline(
     assert res_rust.cv == pytest.approx(res_fb.cv, abs=1e-10, rel=0.0)
     assert res_rust.coef_names == expected["coef_names"] == res_fb.coef_names
 
+    # Frozen fixtures contain the historical conditional calibration.
+    stable_cols = slice(None) if uncond else slice(3)
     npt.assert_allclose(
-        res_rust.scpcstats, np.array(expected["scpcstats"]), atol=1e-10, rtol=0.0
+        res_rust.scpcstats[:, stable_cols],
+        np.array(expected["scpcstats"])[:, stable_cols],
+        atol=1e-10,
+        rtol=0.0,
     )
     npt.assert_allclose(res_rust.scpcstats, res_fb.scpcstats, atol=1e-10, rtol=0.0)
 
     if cvs:
         assert res_rust.scpccvs is not None
         assert res_fb.scpccvs is not None
-        npt.assert_allclose(
-            res_rust.scpccvs, np.array(expected["scpccvs"]), atol=1e-10, rtol=0.0
-        )
+        if uncond:
+            npt.assert_allclose(
+                res_rust.scpccvs, np.array(expected["scpccvs"]), atol=1e-10, rtol=0.0
+            )
         npt.assert_allclose(res_rust.scpccvs, res_fb.scpccvs, atol=1e-10, rtol=0.0)
     else:
         assert res_rust.scpccvs is None

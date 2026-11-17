@@ -27,6 +27,10 @@ or as `scpc-python` dependency with:
 uv pip install spur-python
 ```
 
+Conditional OLS calibration uses the fitted design and the projection order in
+Müller and Watson (2023), §5.1. The optional Rust backend requires
+`spatial-spur-rust>=0.2.1`.
+
 ## Basic Usage
 
 This example starts from the transformed branch of the Becker, Boll and Voth 2026

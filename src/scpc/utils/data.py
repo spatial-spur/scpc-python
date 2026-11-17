@@ -457,9 +457,10 @@ def get_conditional_projection_setup(
     Raises:
         ValueError: Raised later if the regression objects cannot be aligned.
     """
+    # The fitted model matrix already contains any intercept.
     setup = ConditionalProjectionSetup(
         model_mat=np.asarray(model_mat, dtype=float),
-        include_intercept=True,
+        include_intercept=False,
         fixef_id=None,
     )
     if uncond:

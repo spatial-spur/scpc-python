@@ -39,7 +39,7 @@ from .utils.spatial import (
 )
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
-RUST_API_VERSION = 1
+RUST_API_VERSION = 2
 
 
 def resolve_backend(backend: object) -> str:
@@ -264,7 +264,7 @@ def scpc(
             if rust_mod is None:
                 raise RuntimeError(
                     "Rust backend requested (`backend='rust'`), but "
-                    "`spatial_spur_rust` (API_VERSION=1) is not installed."
+                    f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is not installed."
                 )
             if not is_m1_exact:
                 reasons: list[str] = []

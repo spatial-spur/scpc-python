@@ -353,13 +353,13 @@ def orthogonalize_w(
         if include_intercept and not has_intercept_col:
             x = np.column_stack((np.ones(x.shape[0]), x))
 
-        rx = wx[:, 1:] * xjs[:, None]
+        rx = wx[:, 1:] * xj[:, None]
         if fixef_id is not None:
             raise ValueError("Fixed-effect demeaning is not implemented.")
 
-        # remove the part of the spatial directions that lies in the regressor space
+        # Conditional OLS denominator weights are S_x M_V D_x B_q.
         rr = rx - x @ np.linalg.lstsq(x, rx, rcond=None)[0]
-        wx[:, 1:] = rr * xj[:, None]
+        wx[:, 1:] = rr * xjs[:, None]
 
     return wx
 
@@ -399,7 +399,7 @@ def orthogonalize_w_cluster(
     else:
         _, cl_idx = np.unique(cl_vec, return_inverse=True)
 
-    # normalize the influence direction within each cluster before projection
+    # Normalize the influence direction for the final cluster aggregation.
     xj_sq_sum = np.bincount(cl_idx, weights=xj_indiv**2, minlength=nclust)
     xjs_indiv = xj_indiv / np.sqrt(xj_sq_sum[cl_idx])
     xjs_indiv[~np.isfinite(xjs_indiv)] = 0
@@ -422,11 +422,11 @@ def orthogonalize_w_cluster(
             x = np.column_stack((np.ones(x.shape[0]), x))
 
         for col in range(1, ncol_w):
-            temp = w_indiv[:, col] * xjs_indiv
+            temp = w_indiv[:, col] * xj_indiv
             resid_col = temp - x @ np.linalg.lstsq(x, temp, rcond=None)[0]
             wx[:, col] = np.bincount(
                 cl_idx,
-                weights=resid_col * xj_indiv,
+                weights=resid_col * xjs_indiv,
                 minlength=nclust,
             )
 

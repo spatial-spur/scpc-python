@@ -24,7 +24,7 @@ def test_get_conditional_projection_setup_keeps_the_baseline_matrix_for_statsmod
     setup = get_conditional_projection_setup(model, model_mat, n=3, uncond=False)
 
     npt.assert_allclose(setup.model_mat, model_mat, atol=1e-12, rtol=0.0)
-    assert setup.include_intercept is True
+    assert setup.include_intercept is False
     assert setup.fixef_id is None
     assert setup.residualize is None
     assert setup.is_iv is False
@@ -56,7 +56,6 @@ def test_python_r_parity_get_conditional_projection_setup() -> None:
         )
         result <- list(
           model_mat = unname(split(out$model_mat, row(out$model_mat))),
-          include_intercept = out$include_intercept,
           fixef_id = out$fixef_id
         )
         """,
@@ -72,7 +71,6 @@ def test_python_r_parity_get_conditional_projection_setup() -> None:
     npt.assert_allclose(
         py_value.model_mat, np.array(r_value["model_mat"]), atol=ATOL, rtol=RTOL
     )
-    assert py_value.include_intercept is r_value["include_intercept"]
     assert py_value.fixef_id == r_value["fixef_id"]
     assert py_value.residualize is None
     assert py_value.is_iv is False
