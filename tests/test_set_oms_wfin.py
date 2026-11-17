@@ -7,7 +7,7 @@ import pytest
 from scpc.types import SpatialSetup
 from scpc.utils.spatial import set_oms_wfin
 from tests.config import ATOL, RTOL
-from tests.utils import R, execute_r_code
+from tests.utils import execute_r_code
 
 
 def assert_columns_allclose_up_to_sign(left: np.ndarray, right: np.ndarray) -> None:
@@ -72,7 +72,6 @@ def test_set_oms_wfin_returns_a_coherent_approximate_spatial_setup() -> None:
     assert np.array_equal(np.sort(result.perm), np.arange(4))
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_set_oms_wfin_exact() -> None:
     coords = [
         [0.0, 0.0],
@@ -110,6 +109,7 @@ def test_python_r_parity_set_oms_wfin_exact() -> None:
             "method": "exact",
             "large_n_seed": 1,
         },
+        fixture="test_python_r_parity_set_oms_wfin_exact",
     )
     py_value = set_oms_wfin(
         np.array(coords), 0.1, latlong=False, method="exact", large_n_seed=1
@@ -143,7 +143,6 @@ def test_python_r_parity_set_oms_wfin_exact() -> None:
         )
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_set_oms_wfin_approx() -> None:
     coords = [[0.0], [1.0], [2.0], [3.0]]
 
@@ -177,6 +176,7 @@ def test_python_r_parity_set_oms_wfin_approx() -> None:
             "method": "approx",
             "large_n_seed": 1,
         },
+        fixture="test_python_r_parity_set_oms_wfin_approx",
     )
     py_value = set_oms_wfin(
         np.array(coords), 0.1, latlong=False, method="approx", large_n_seed=1

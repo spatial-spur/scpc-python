@@ -310,7 +310,6 @@ def test_scpc_runs_clustered_conditional_approximate_scpc() -> None:
     assert result.large_n_seed == 7
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_scpc_approx() -> None:
     payload = {
         "data": {
@@ -357,6 +356,7 @@ def test_python_r_parity_scpc_approx() -> None:
         )
         """,
         payload=payload,
+        fixture="test_python_r_parity_scpc_approx",
     )
     py_value = scpc(
         model,
@@ -380,7 +380,6 @@ def test_python_r_parity_scpc_approx() -> None:
     assert py_value.large_n_seed == r_value["large_n_seed"]
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_scpc_clustered_approx() -> None:
     payload = {
         "data": {
@@ -429,6 +428,7 @@ def test_python_r_parity_scpc_clustered_approx() -> None:
         )
         """,
         payload=payload,
+        fixture="test_python_r_parity_scpc_clustered_approx",
     )
     py_value = scpc(
         model,

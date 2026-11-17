@@ -8,7 +8,7 @@ import pytest
 
 from scpc.utils.spatial import lnset_wc0
 from tests.config import ATOL, RTOL
-from tests.utils import R, execute_r_code
+from tests.utils import execute_r_code
 
 
 def assert_columns_allclose_up_to_sign(left: np.ndarray, right: np.ndarray) -> None:
@@ -41,7 +41,6 @@ def test_lnset_wc0_returns_a_coherent_large_n_setup() -> None:
     assert isinstance(random_t, int)
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_lnset_wc0() -> None:
     s = [[0.0], [1.0], [2.0], [3.0]]
 
@@ -74,6 +73,7 @@ def test_python_r_parity_lnset_wc0() -> None:
             "m": 3,
             "random_t": 1,
         },
+        fixture="test_python_r_parity_lnset_wc0",
     )
     py_w, py_c0, py_cmax, py_random_t = lnset_wc0(
         np.array(s),

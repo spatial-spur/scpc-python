@@ -269,7 +269,6 @@ def scpc(
     model_mat_cond = np.asarray(cond_setup.model_mat, dtype=float)
     cond_include_intercept = cond_setup.include_intercept
     cond_fixef_id = cond_setup.fixef_id
-    cond_is_iv = cond_setup.is_iv
     cond_residualize = cond_setup.residualize
 
     if model_mat_cond.shape != (n, p):
@@ -292,12 +291,6 @@ def scpc(
             raise ValueError("`cluster` must be a single column name.")
         if cluster not in data.columns:
             raise ValueError(f"Cluster variable not found in data: {cluster}")
-        if cond_fixef_id is not None and not uncond:
-            raise ValueError(
-                "Conditional SCPC with absorbed fixed effects and external "
-                "clustering is not yet implemented; use `uncond = TRUE`."
-            )
-
         cl_values = np.asarray(data.iloc[np.asarray(obs_index, dtype=int) - 1][cluster])
         cl_levels, cl_idx = np.unique(cl_values, return_inverse=True)
 
@@ -332,7 +325,7 @@ def scpc(
 
     fe_id_0based: np.ndarray | None = None
     fe_multiway = False
-    if model_has_fe and model_is_iv and not uncond:
+    if model_has_fe and not uncond:
         fe_raw = getattr(model, "_fe", None)
         if fe_raw is None:
             fe_multiway = True
@@ -372,7 +365,7 @@ def scpc(
             if not is_rust_eligible:
                 reasons: list[str] = []
                 if fe_multiway:
-                    reasons.append("multi-way absorbed fixed-effect IV demeaning")
+                    reasons.append("multi-way absorbed fixed-effect demeaning")
                 if model_is_weighted:
                     reasons.append("weighted or non-OLS models")
                 if k_use < 1:
@@ -438,11 +431,11 @@ def scpc(
                         fe_arg = fe_id_0based
                     else:
                         fe_arg = None
-                    proj_u, proj_v = compute_iv_projector(x_iv, z_iv)
-                    rust_xj = xjs_mat
-                    rust_xjs = xj_mat
+                    proj_v, proj_u = compute_iv_projector(x_iv, z_iv)
+                    rust_xj = xj_mat
+                    rust_xjs = xjs_mat
                 else:
-                    fe_arg = None
+                    fe_arg = fe_id_0based
                     proj_u, proj_v = compute_orthogonal_projector(
                         model_mat_cond,
                         include_intercept=cond_include_intercept,
@@ -644,7 +637,7 @@ def scpc(
                     )
 
                 xj_indiv = neff * (bread_inv[j, :] @ model_mat_cond.T)
-                if cond_is_iv:
+                if cond_residualize is not None:
                     wx = orthogonalize_w_cluster_iv(
                         wfin,
                         cl_idx_scpc,
@@ -663,7 +656,7 @@ def scpc(
                 xj = neff * (bread_inv[j, :] @ model_mat_cond.T)
                 xj = xj[perm]
                 xjs = np.sign(xj)
-                if cond_is_iv:
+                if cond_residualize_use is not None:
                     wx = orthogonalize_w_iv(
                         wfin,
                         xj,

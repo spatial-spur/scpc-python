@@ -114,3 +114,9 @@ Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting f
 Müller, Ulrich K. and Mark W. Watson "Spatial Correlation Robust Inference", Econometrica 90(6) (2022), 2901–2935. https://www.princeton.edu/~umueller/SHAR.pdf.
 
 Müller, Ulrich K. and Mark W. Watson "Spatial Correlation Robust Inference in Linear Regression and Panel Models", Journal of Business & Economic Statistics 41(4) (2023), 1050–1064. https://www.princeton.edu/~umueller/SpatialRegression.pdf.
+
+Conditional SCPC accounts for absorbed fixed effects in the projection. IV
+conditional weights use the transpose of the IV residual maker, including for
+clustered data. These corrections can change conditional p-values and critical
+values from earlier releases. Multiway absorbed effects use the fallback backend;
+requesting the Rust backend for these models raises `NotImplementedError`.

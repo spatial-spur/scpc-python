@@ -494,16 +494,32 @@ def get_conditional_projection_setup(
             return ConditionalProjectionSetup(
                 model_mat=model_mat_iv,
                 include_intercept=not bool(design["has_fixef"]),
-                fixef_id=None,
-                residualize=make_iv_residualizer(x_iv, z_iv, demean=demean),
+                fixef_id=np.asarray(getattr(model, "_fe"))
+                if demean is not None
+                else None,
+                residualize=make_iv_residualizer(
+                    x_iv, z_iv, demean=demean, transpose=True
+                ),
                 is_iv=True,
             )
 
         if has_fixest_fe(model):
+            demean = make_pyfixest_demeaner(model)
+
+            def residualize_fe(values: MatrixLike) -> np.ndarray:
+                centered = np.asarray(
+                    demean(values, context="conditional FE projection"), dtype=float
+                )
+                return (
+                    centered
+                    - model_mat @ np.linalg.lstsq(model_mat, centered, rcond=None)[0]
+                )
+
             return ConditionalProjectionSetup(
                 model_mat=model_mat,
                 include_intercept=False,
-                fixef_id=None,
+                fixef_id=np.asarray(getattr(model, "_fe")),
+                residualize=residualize_fe,
             )
 
         return setup

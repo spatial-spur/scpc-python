@@ -166,6 +166,7 @@ def make_iv_residualizer(
     Z: MatrixLike,
     tol: float = 1e-10,
     demean=None,
+    transpose: bool = False,
 ):
     """Build the IV residualizer used by conditional SCPC.
 
@@ -180,6 +181,8 @@ def make_iv_residualizer(
         tol: Rank tolerance used in the linear solves.
         demean: Optional callable that applies the same fixed-effect demeaning
             used by the fitted model to a vector or matrix.
+        transpose: Apply the transpose of the IV residual maker. Conditional
+            denominator weights require this form for an oblique projection.
 
     Returns:
         A callable that residualizes a vector or matrix against the IV
@@ -218,6 +221,9 @@ def make_iv_residualizer(
             Y = np.asarray(demean(Y, context="IV residualizer Y"), dtype=float)
 
         # project y into the instrument space before taking out the x part.
+        if transpose:
+            coef = np.linalg.solve(A.T, X.T @ Y)
+            return restore_residualizer_shape(Y - pzx @ coef, vec_input)
         pzy = qz @ (qz.T @ Y)
         coef = np.linalg.solve(A, X.T @ pzy)
         if not np.isfinite(coef).all():
@@ -238,9 +244,8 @@ def orthogonalize_w_iv(
 ) -> MatrixLike:
     """Build the conditional IV projection matrix for non-clustered SCPC.
 
-    This mirrors `scpcR:::.orthogonalize_W_iv()`, which applies the IV
-    residualizer to the non-constant spatial directions before scaling them
-    by the coefficient-specific influence direction.
+    Apply the transposed IV residual maker to the regressor-weighted spatial
+    directions, then scale by the normalized coefficient influence direction.
 
     Args:
         wfin: Spatial projection matrix.
@@ -272,9 +277,9 @@ def orthogonalize_w_iv(
     wx[:, 0] = wfin[:, 0] * xj * xjs
 
     if wfin.shape[1] > 1:
-        y = wfin[:, 1:] * xjs[:, None]
+        y = wfin[:, 1:] * xj[:, None]
         r = np.asarray(residualize(y), dtype=float)
-        wx[:, 1:] = r * xj[:, None]
+        wx[:, 1:] = r * xjs[:, None]
 
     if not np.isfinite(wx).all():
         raise ValueError("Conditional IV projection produced non-finite W values.")
@@ -290,10 +295,9 @@ def orthogonalize_w_cluster_iv(
 ) -> MatrixLike:
     """Build the conditional IV projection matrix for clustered SCPC.
 
-    This mirrors `scpcR:::.orthogonalize_W_cluster_iv()`. It normalizes the
-    individual influence direction within clusters, applies the IV
-    residualizer at the individual level, and then aggregates back to the
-    cluster level.
+    Normalize individual influence directions within clusters, apply the
+    transposed IV residual maker to regressor-weighted spatial directions,
+    and aggregate the resulting weights back to the cluster level.
 
     Args:
         wfin: Cluster-level spatial projection matrix.
@@ -335,11 +339,11 @@ def orthogonalize_w_cluster_iv(
     )
 
     if ncol_w > 1:
-        y = w_indiv[:, 1:] * xjs_indiv[:, None]
+        y = w_indiv[:, 1:] * xj_indiv[:, None]
         r = np.asarray(residualize(y), dtype=float)
         wx[:, 1:] = np.column_stack(
             [
-                np.bincount(cl_idx, weights=r[:, col] * xj_indiv, minlength=nclust)
+                np.bincount(cl_idx, weights=r[:, col] * xjs_indiv, minlength=nclust)
                 for col in range(r.shape[1])
             ]
         )

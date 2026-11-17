@@ -320,8 +320,19 @@ def ensure_scpc_r_installed() -> None:
     )
 
 
-def execute_r_code(code: str, *, payload: Any | None = None) -> Any:
-    """Execute R code against the cached scpcR install and return JSON."""
+def execute_r_code(
+    code: str, *, payload: Any | None = None, fixture: str | None = None
+) -> Any:
+    """Execute the pinned release oracle, or load a recorded corrected R result."""
+    if fixture is not None:
+        path = (
+            PROJECT_ROOT
+            / "tests"
+            / "fixtures"
+            / "scpcr_corrected_20261117"
+            / (fixture + ".json")
+        )
+        return json.loads(path.read_text())
     assert R is not None, "Rscript not found."
 
     ensure_scpc_r_installed()

@@ -169,14 +169,18 @@ def test_python_r_parity_get_conditional_projection_setup_for_pyfixest_fe_iv() -
 
     npt.assert_allclose(py_value.model_mat, r_model_mat, atol=ATOL, rtol=RTOL)
     assert py_value.include_intercept is False
-    assert py_value.fixef_id is None
+    assert py_value.fixef_id is not None
     assert py_value.residualize is not None
-    npt.assert_allclose(
-        np.asarray(py_value.residualize(y), dtype=float),
-        np.array(r_value["resid"]),
-        atol=ATOL,
-        rtol=RTOL,
-    )
+    # The installed historical R helper applies M; SCPC denominator weights
+    # require M.T. Construct the full FE and IV projection independently.
+    groups = np.asarray(data["fe"])
+    dummies = np.equal.outer(groups, np.unique(groups)).astype(float)
+    fe_m = np.eye(len(data)) - dummies @ np.linalg.pinv(dummies)
+    x = fe_m @ np.asarray(design["X"])
+    z = fe_m @ np.asarray(design["Z"])
+    pz = z @ np.linalg.pinv(z)
+    m = fe_m - x @ np.linalg.solve(x.T @ pz @ x, x.T @ pz)
+    npt.assert_allclose(py_value.residualize(y), m.T @ y, atol=ATOL, rtol=RTOL)
     assert py_value.is_iv is True
 
 
@@ -197,9 +201,10 @@ def test_get_conditional_projection_setup_uses_demeaned_pyfixest_fe_matrix() -> 
 
     npt.assert_allclose(setup.model_mat, model_mat, atol=1e-12, rtol=0.0)
     assert setup.include_intercept is False
-    assert setup.fixef_id is None
-    assert setup.residualize is None
+    assert setup.fixef_id is not None
+    assert setup.residualize is not None
     assert setup.is_iv is False
+    npt.assert_allclose(setup.residualize(np.ones(4)), 0.0, atol=1e-12)
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")

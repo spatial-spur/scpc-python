@@ -7,7 +7,7 @@ import pytest
 
 from scpc.utils.spatial import get_avc, get_c0_from_avc
 from tests.config import ATOL, RTOL
-from tests.utils import R, execute_r_code
+from tests.utils import execute_r_code
 
 
 def test_get_c0_from_avc_inverts_the_target_average_correlation() -> None:
@@ -21,7 +21,6 @@ def test_get_c0_from_avc_inverts_the_target_average_correlation() -> None:
     assert get_avc(c0, dist) == pytest.approx(avc0, abs=3e-4)
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_get_c0_from_avc() -> None:
     dist = [0.1, 0.2, 0.4, 0.8]
     avc0 = 0.2
@@ -29,6 +28,7 @@ def test_python_r_parity_get_c0_from_avc() -> None:
     r_value = execute_r_code(
         'result <- getFromNamespace(".getc0fromavc", "scpcR")(unlist(payload$dist), payload$avc0)',
         payload={"dist": dist, "avc0": avc0},
+        fixture="test_python_r_parity_get_c0_from_avc",
     )
     py_value = get_c0_from_avc(np.array(dist), avc0)
 

@@ -26,6 +26,16 @@ def _run_r_scpc_iv(
     *,
     cluster: str | None = None,
 ):
+    fixture_by_case: dict[tuple[str, str | None], str] = {
+        ("y ~ w | x ~ z", None): "test_scpc_matches_r_for_non_fe_iv_exact",
+        ("y ~ w | fe | x ~ z", None): "test_scpc_matches_r_for_one_way_fe_iv_exact",
+        (
+            "y ~ w | fe1 + fe2 | x ~ z",
+            None,
+        ): "test_scpc_matches_r_for_two_way_fe_iv_exact",
+        ("y ~ w | x ~ z", "cl"): "test_scpc_matches_r_for_clustered_iv_exact",
+        ("y ~ w | fe | x ~ z", "cl"): "test_scpc_matches_r_for_clustered_fe_iv_exact",
+    }
     return execute_r_code(
         """
         suppressPackageStartupMessages(library(fixest))
@@ -79,6 +89,7 @@ def _run_r_scpc_iv(
             "data": data.to_dict(orient="list"),
             "cluster": cluster,
         },
+        fixture=fixture_by_case[(formula, cluster)],
     )
 
 
@@ -136,12 +147,10 @@ def _assert_pyfixest_scpc_parity(
     assert py_result.avc == pytest.approx(r_value["avc"], abs=ATOL, rel=RTOL)
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_scpc_matches_r_for_non_fe_iv_exact() -> None:
     _assert_pyfixest_scpc_parity("y ~ w | x ~ z", make_basic_iv_data(2001))
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_scpc_matches_r_for_one_way_fe_iv_exact() -> None:
     _assert_pyfixest_scpc_parity(
         "y ~ w | fe | x ~ z",
@@ -149,7 +158,6 @@ def test_scpc_matches_r_for_one_way_fe_iv_exact() -> None:
     )
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_scpc_matches_r_for_two_way_fe_iv_exact() -> None:
     _assert_pyfixest_scpc_parity(
         "y ~ w | fe1 + fe2 | x ~ z",
@@ -157,7 +165,6 @@ def test_scpc_matches_r_for_two_way_fe_iv_exact() -> None:
     )
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_scpc_matches_r_for_clustered_iv_exact() -> None:
     _assert_pyfixest_scpc_parity(
         "y ~ w | x ~ z",
@@ -166,7 +173,6 @@ def test_scpc_matches_r_for_clustered_iv_exact() -> None:
     )
 
 
-@pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_scpc_matches_r_for_clustered_fe_iv_exact() -> None:
     _assert_pyfixest_scpc_parity(
         "y ~ w | fe | x ~ z",
