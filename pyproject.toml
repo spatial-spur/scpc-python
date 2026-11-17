@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rust = ["spatial-spur-rust>=0.2.1"]
+rust = ["spatial-spur-rust>=0.2.1,<0.3.0"]
 
 [dependency-groups]
 dev = [

@@ -3,11 +3,11 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy import stats
+from scipy import optimize, stats
 from scipy.sparse.linalg import eigsh
 
 from ..types import ArrayLike, MatrixLike, SpatialSetup
-from .matrix import demeanmat, get_w, lvech
+from .matrix import demeanmat, get_w_with_ties, lvech
 
 LARGE_N_THRESHOLD = 4500
 LARGE_N_CAPN = 20
@@ -74,9 +74,11 @@ def get_distmat(s: MatrixLike, latlong: bool) -> MatrixLike:
         dlon = lon[:, None] - lon[None, :]
         dlat = lat[:, None] - lat[None, :]
 
-        a = (
+        a = np.clip(
             np.sin(dlat / 2) ** 2
-            + np.cos(lat[:, None]) * np.cos(lat[None, :]) * np.sin(dlon / 2) ** 2
+            + np.cos(lat[:, None]) * np.cos(lat[None, :]) * np.sin(dlon / 2) ** 2,
+            0.0,
+            1.0,
         )
         d = 2 * 6378137 * np.arcsin(np.sqrt(a))
         d = d / (2 * math.pi * 6378137)
@@ -103,14 +105,12 @@ def get_distvec(s1: MatrixLike, s2: MatrixLike, latlong: bool) -> ArrayLike:
         lat2 = np.radians(s2[:, 1])
         dlon = 0.5 * (lon1 - lon2)
         dlat = 0.5 * (lat1 - lat2)
-        return (
-            np.arcsin(
-                np.sqrt(
-                    np.sin(dlat) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon) ** 2
-                )
-            )
-            / math.pi
+        a = np.clip(
+            np.sin(dlat) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon) ** 2,
+            0.0,
+            1.0,
         )
+        return np.arcsin(np.sqrt(a)) / math.pi
 
     return np.sqrt(np.sum((s1 - s2) ** 2, axis=1))
 
@@ -216,8 +216,10 @@ def lnset_wc0(
         stop = (i + 1) * block_len
         distvec[start:stop] = lvech(distmat)
 
+    floor_corr = float(np.mean(distvec == 0.0))
+    minavc_eff = floor_corr + (1.0 - floor_corr) * minavc
     c0 = get_c0_from_avc(distvec, avc0)
-    cmax = get_c0_from_avc(distvec, minavc)
+    cmax = get_c0_from_avc(distvec, minavc_eff)
 
     wall = np.zeros((n, capN * qmax), dtype=float)
     for i, (subset, distmat) in enumerate(ms):
@@ -322,9 +324,8 @@ def validate_scpc_method(method: object) -> str:
 def get_c0_from_avc(dist: ArrayLike, avc0: float) -> float:
     """Solve for the kernel scale implied by a target average correlation.
 
-    Users think in terms of an average correlation bound, but the spatial
-    kernel itself is parameterized by a scale value. This helper bridges that
-    gap by turning the bound into the kernel scale used internally.
+    Uses a scale-invariant initial guess, validates the co-location floor,
+    brackets the root without fixed upper caps, and solves to high precision.
 
     Args:
         dist: Pairwise distances.
@@ -333,36 +334,188 @@ def get_c0_from_avc(dist: ArrayLike, avc0: float) -> float:
     Returns:
         The kernel scale matching the requested average correlation.
     """
-    c0 = 10.0
-    c1 = 10.0
+    dist_arr = np.asarray(dist, dtype=np.float64).ravel()
+    if dist_arr.size == 0:
+        raise ValueError("At least two locations are required.")
+    if not np.isfinite(dist_arr).all() or bool(np.any(dist_arr < 0.0)):
+        raise ValueError("Distances must be finite and nonnegative.")
 
-    while get_avc(c0, dist) < avc0:
-        c1 = c0
-        c0 = 0.5 * c0
+    pos_mask = dist_arr > 0.0
+    floor_corr = float(np.mean(dist_arr == 0.0))
+    if (
+        not bool(np.any(pos_mask))
+        or not math.isfinite(avc0)
+        or avc0 <= floor_corr
+        or avc0 >= 1.0
+    ):
+        raise ValueError(
+            "Target correlation must exceed the co-located-pair fraction and be below one."
+        )
 
-    while get_avc(c1, dist) > avc0 and c1 < 5000:
-        c0 = c1
-        c1 = 2 * c1
+    pos_dist = dist_arr[pos_mask]
+    mean_pos = float(np.mean(pos_dist))
+    max_d = float(np.max(pos_dist))
+    target_pos = (avc0 - floor_corr) / (1.0 - floor_corr)
+    near_one = avc0 > 0.9999
+    finfo = np.finfo(np.float64)
+    tiny = float(finfo.tiny)
+    huge = float(finfo.max)
 
-    while True:
-        # search on the same multiplicative scale as the R implementation
-        c = math.sqrt(c0 * c1)
-        if get_avc(c, dist) > avc0:
-            c0 = c
+    if math.isfinite(mean_pos) and mean_pos > 0.0:
+        cand = -math.log(target_pos) / mean_pos
+        if math.isfinite(cand) and cand > 0.0:
+            raw_init = cand
         else:
-            c1 = c
-        if c1 - c0 < 0.001:
-            break
+            raw_init = min(max(1.0 / max_d, tiny), huge * 0.5)
+    else:
+        raw_init = min(max(1.0 / max_d, tiny), huge * 0.5)
 
-    return c
+    def eval_residual(c: float) -> float:
+        if near_one:
+            return (1.0 - avc0) + float(np.sum(np.expm1(-c * pos_dist))) / dist_arr.size
+        return float(np.mean(np.exp(-c * dist_arr))) - avc0
+
+    lo = raw_init
+    hi = raw_init
+    f_lo = eval_residual(lo)
+    if f_lo == 0.0:
+        return float(lo)
+
+    if f_lo < 0.0:
+        hi = lo
+        for _ in range(1024):
+            lo *= 0.5
+            if lo == 0.0 or not math.isfinite(lo):
+                raise ValueError(
+                    "Decay calibration lower bracket underflowed; distances may be degenerate."
+                )
+            f_lo = eval_residual(lo)
+            if f_lo == 0.0:
+                return float(lo)
+            if f_lo > 0.0:
+                break
+            hi = lo
+        if f_lo < 0.0:
+            raise ValueError("Decay calibration lower bracket did not enclose root.")
+    else:
+        f_hi = f_lo
+        for _ in range(1024):
+            lo = hi
+            f_lo = f_hi
+            if hi >= huge * 0.5:
+                hi = huge
+                f_hi = eval_residual(hi)
+                break
+            hi *= 2.0
+            f_hi = eval_residual(hi)
+            if f_hi == 0.0:
+                return float(hi)
+            if f_hi < 0.0:
+                break
+        if f_hi > 0.0:
+            raise ValueError(
+                "Spatial decay calibration failed to bracket upper decay scale."
+            )
+
+    sol = optimize.root_scalar(
+        eval_residual,
+        bracket=[lo, hi],
+        method="brentq",
+        rtol=1e-13,
+        xtol=tiny,
+        maxiter=200,
+    )
+    if sol.converged and math.isfinite(sol.root) and sol.root > 0.0:
+        return float(sol.root)
+
+    # Safeguarded fallback bisection in log-scale
+    for _ in range(128):
+        mid = math.sqrt(lo * hi) if lo > 0.0 and hi / lo > 4.0 else 0.5 * (lo + hi)
+        if mid == lo or mid == hi:
+            break
+        if eval_residual(mid) > 0.0:
+            lo = mid
+        else:
+            hi = mid
+    return float(0.5 * (lo + hi))
+
+
+def _log_one_plus_exp(x: np.ndarray) -> np.ndarray:
+    return np.where(x > 0.0, x + np.log1p(np.exp(-np.abs(x))), np.log1p(np.exp(x)))
+
+
+def _angular_product(
+    cos2: np.ndarray, ratios: np.ndarray, logs: np.ndarray
+) -> np.ndarray:
+    out = np.zeros_like(cos2)
+    pos = cos2 > 0.0
+    if not bool(np.any(pos)):
+        return out
+    c_pos = cos2[pos]
+    prod = np.prod(c_pos[:, None] / (c_pos[:, None] + ratios[None, :]), axis=1)
+    tiny = float(np.finfo(np.float64).tiny)
+    use_sqrt = prod >= tiny
+    res = np.empty_like(prod)
+    if bool(np.any(use_sqrt)):
+        res[use_sqrt] = np.sqrt(prod[use_sqrt])
+    if bool(np.any(~use_sqrt)):
+        log_cos = np.log(c_pos[~use_sqrt])
+        res[~use_sqrt] = np.exp(
+            -0.5 * np.sum(_log_one_plus_exp(logs[None, :] - log_cos[:, None]), axis=1)
+        )
+    out[pos] = res
+    return out
+
+
+def _complement_integrand(
+    sin2: np.ndarray, denom: np.ndarray, ratios: np.ndarray, scale: float
+) -> np.ndarray:
+    product = np.ones_like(sin2)
+    deficit = np.zeros_like(sin2)
+    for ratio in ratios:
+        extra = (float(ratio) / scale) * denom
+        inv = 1.0 / (sin2 + extra)
+        deficit = deficit + product * extra * inv
+        product = product * (sin2 * inv)
+    return deficit / ((1.0 + np.sqrt(product)) * denom)
+
+
+def _quad_panel(fn, lo: float, hi: float) -> float:
+    width = hi - lo
+    theta = lo + width * GQX
+    sin_t = np.sin(theta)
+    cos_t = np.cos(theta)
+    vals = fn(sin_t * sin_t, cos_t * cos_t)
+    return float(width * np.dot(GQW, vals))
+
+
+def _quad_adaptive(
+    fn, lo: float, hi: float, whole: float, tol: float, depth: int
+) -> float:
+    mid = 0.5 * (lo + hi)
+    left = _quad_panel(fn, lo, mid)
+    right = _quad_panel(fn, mid, hi)
+    if depth == 20 or abs(left + right - whole) <= max(tol, 1e-11 * abs(whole)):
+        return left + right
+    return _quad_adaptive(fn, lo, mid, left, tol * 0.5, depth + 1) + _quad_adaptive(
+        fn, mid, hi, right, tol * 0.5, depth + 1
+    )
+
+
+def _integrate_angular(fn) -> float:
+    half_pi = 0.5 * math.pi
+    whole = _quad_panel(fn, 0.0, half_pi)
+    tol = 1e-10 * abs(whole) if abs(whole) < 1e-8 else 1e-11
+    return _quad_adaptive(fn, 0.0, half_pi, whole, tol, 0) * (2.0 / math.pi)
 
 
 def get_rp(om: MatrixLike, cv: float) -> float:
     """Evaluate the rejection probability for one omega matrix.
 
-    This is the low-level size-control calculation inside SCPC. It tells the
-    package how likely a given covariance case is to reject at a proposed
-    normalized critical value.
+    Uses the exact Cauchy formula for a single negative eigenvalue, handles
+    zero-denominator covariances by returning 1.0 when the numerator is
+    positive, and uses tail-stable adaptive angular/complement quadrature for
+    higher dimensions.
 
     Args:
         om: Omega matrix for one spatial covariance case.
@@ -371,31 +524,53 @@ def get_rp(om: MatrixLike, cv: float) -> float:
     Returns:
         The rejection probability for that case.
     """
-    om = np.asarray(om, dtype=float)
+    if not math.isfinite(cv):
+        raise ValueError("SCPC critical value must be finite.")
+    if cv <= 0.0:
+        return 1.0
 
-    # replace the first row after scaling, just as in the R implementation
-    omx = -(cv**2) * om
-    omx[0, :] = om[0, :]
+    om = np.asarray(om, dtype=np.float64)
+    if cv > 1.0:
+        pos = 1.0 / (cv * cv)
+        neg = -1.0
+    else:
+        pos = 1.0
+        neg = -(cv * cv)
+
+    omx = neg * om
+    omx[0, :] = pos * om[0, :]
 
     evals_raw = np.real(np.linalg.eigvals(omx))
-    evals = -evals_raw[evals_raw < 0]
-    if len(evals) == 0:
+    max_positive = float(np.max(evals_raw)) if evals_raw.size > 0 else 0.0
+    if not math.isfinite(max_positive) or max_positive <= 0.0:
         return 0.0
 
-    denom = np.max(evals_raw)
-    if not np.isfinite(denom) or denom <= 0:
-        return 0.0
+    neg_evals = -evals_raw[evals_raw < 0.0]
+    if neg_evals.size == 0:
+        return 1.0
 
-    evals = evals / denom
-    tot = 0.0
-    for j in range(len(GQX)):
-        u = GQX[j]
-        arg = (1 - u**2) * math.exp(np.sum(np.log1p(evals / (1 - u**2))))
-        if not np.isfinite(arg) or arg <= 0:
-            continue
-        tot = tot + GQW[j] / math.sqrt(arg)
+    ratios = neg_evals / max_positive
+    logs = np.log(neg_evals) - math.log(max_positive)
+    if ratios.size == 1:
+        return float((2.0 / math.pi) * math.atan(math.exp(-0.5 * float(logs[0]))))
 
-    return float(tot * 2 / math.pi)
+    scale = float(np.sum(ratios))
+    if scale == 0.0:
+        return 1.0
+
+    if scale < 0.0625:
+        deficit = _integrate_angular(
+            lambda sin2, cos2: _complement_integrand(
+                sin2, cos2 + scale * sin2, ratios, scale
+            )
+        )
+        probability = 1.0 - math.sqrt(scale) * deficit
+    else:
+        probability = _integrate_angular(
+            lambda _sin2, cos2: _angular_product(cos2, ratios, logs)
+        )
+
+    return float(min(1.0, max(0.0, probability)))
 
 
 def max_rp(oms: list[MatrixLike], q: int, cv: float) -> tuple[float, int]:
@@ -434,19 +609,27 @@ def get_cv(oms: list[MatrixLike], q: int, level: float) -> float:
     """
     rp = 1.0
     i = 0
-    cv0 = stats.t.ppf(1 - level / 2, df=q) / math.sqrt(q)
+    step = 1.0 / math.sqrt(q)
+    cv0 = stats.t.ppf(1 - level / 2, df=q) * step
+    cv1 = cv0
 
-    while rp > level:
+    for _ in range(len(oms) + 5):
+        if rp <= level:
+            break
         cv1 = cv0
-        while True:
+        for iter_idx in range(1024):
             if get_rp(oms[i][: q + 1, : q + 1], cv1) > level:
                 cv0 = cv1
-                cv1 = cv1 + 1 / math.sqrt(q)
+                cv1 += step if iter_idx < 32 else cv1
             else:
                 break
+        if get_rp(oms[i][: q + 1, : q + 1], cv1) > level:
+            raise ValueError("SCPC critical value could not be bracketed.")
 
-        while cv1 - cv0 > 0.001 / math.sqrt(q):
+        while cv1 - cv0 > 0.001 * step:
             cv = 0.5 * (cv0 + cv1)
+            if cv == cv0 or cv == cv1:
+                break
             if get_rp(oms[i][: q + 1, : q + 1], cv) > level:
                 cv0 = cv
             else:
@@ -601,6 +784,7 @@ def set_oms_wfin(
     coords_use = coords
     perm = np.arange(n, dtype=int)
     random_t: int | None = None
+    tied = False
 
     while True:
         qmax = min(qmax, n - 1)
@@ -608,9 +792,11 @@ def set_oms_wfin(
         if method_actual == "exact":
             distmat = get_distmat(coords, latlong)
             distv = lvech(distmat)
+            floor_corr = float(np.mean(distv == 0.0))
+            minavc_eff = floor_corr + (1.0 - floor_corr) * MINAVC
             c0 = get_c0_from_avc(distv, avc0)
-            cmax = get_c0_from_avc(distv, MINAVC)
-            w = get_w(distmat, c0, qmax)
+            cmax = get_c0_from_avc(distv, minavc_eff)
+            w, tied = get_w_with_ties(distmat, c0, qmax)
             oms = get_oms(distmat, c0, cmax, w, CGRIDFAC)
             coords_use = coords
             perm = np.arange(n, dtype=int)
@@ -639,6 +825,7 @@ def set_oms_wfin(
                 latlong=latlong,
             )
             distmat = None
+            tied = False
 
         wfin, cvfin, q = set_final_w(oms, w, qmax)
         if q < qmax or qmax == n - 1:
@@ -657,4 +844,5 @@ def set_oms_wfin(
         method=method_actual,
         large_n=method_actual == "approx",
         random_state=random_t,
+        tied=tied,
     )

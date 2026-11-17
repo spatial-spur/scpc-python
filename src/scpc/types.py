@@ -82,6 +82,8 @@ class SpatialSetup:
     """Whether the approximate large-n branch was used."""
     random_state: int | None
     """Random state carried forward by the approximate branch."""
+    tied: bool = False
+    """Whether the leading spatial eigenspace had a numerical tie."""
 
 
 @dataclass(slots=True)
@@ -110,6 +112,8 @@ class SCPCResult:
     """Seed used by the large-n approximation branch."""
     backend: str = "fallback"
     """Execution backend actually used: `rust` or `fallback`."""
+    tied: bool = False
+    """Whether the leading spatial eigenspace had a numerical tie."""
 
     def __repr__(self) -> str:
         """Return a developer-oriented representation of the result.
@@ -153,6 +157,13 @@ class SCPCResult:
                 columns=SCPC_CV_COLUMNS,
             )
             lines.extend(["", "Two-sided critical values:", cvs.to_string()])
+        if self.tied:
+            lines.extend(
+                [
+                    "",
+                    "Note: Leading spatial eigenvalues exhibited a numerical tie.",
+                ]
+            )
         return "\n".join(lines)
 
     def summary(self) -> str:
@@ -188,6 +199,13 @@ class SCPCResult:
                 columns=SCPC_CV_COLUMNS,
             )
             lines.extend(["", "Two-sided critical values:", cvs.to_string()])
+        if self.tied:
+            lines.extend(
+                [
+                    "",
+                    "Note: Leading spatial eigenvalues exhibited a numerical tie.",
+                ]
+            )
         return "\n".join(lines)
 
     def coef(self) -> Any:

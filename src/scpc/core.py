@@ -8,6 +8,10 @@ from typing import Any
 import warnings
 
 import numpy as np
+from statsmodels.genmod.generalized_linear_model import GLM as SmGLM
+from statsmodels.regression.linear_model import GLS as SmGLS
+from statsmodels.regression.linear_model import OLS as SmOLS
+from statsmodels.regression.linear_model import WLS as SmWLS
 
 from .types import DataFrameLike, MatrixLike, ModelLike, SCPCResult
 from .utils.data import (
@@ -17,6 +21,8 @@ from .utils.data import (
     get_fixest_score_matrix,
     get_obs_index,
     get_scpc_model_matrix,
+    has_fixest_fe,
+    is_fixest_iv_second_stage,
     is_pyfixest_model,
     is_pyfixest_multi,
     resolve_coords_input,
@@ -43,17 +49,47 @@ RUST_API_VERSION = 2
 
 
 def resolve_backend(backend: object) -> str:
-    """Resolve the execution backend from argument and `SPATIAL_BACKEND`."""
-    if not isinstance(backend, str) or backend not in VALID_BACKENDS:
-        raise ValueError('`backend` must be one of "auto", "rust", or "fallback".')
-    if backend == "auto":
+    """Resolve the execution backend from explicit argument or `SPATIAL_BACKEND`."""
+    if backend is None:
         env_backend = os.environ.get("SPATIAL_BACKEND", "auto") or "auto"
         if env_backend not in VALID_BACKENDS:
             raise ValueError(
                 '`SPATIAL_BACKEND` must be one of "auto", "rust", or "fallback".'
             )
         return env_backend
+    if not isinstance(backend, str) or backend not in VALID_BACKENDS:
+        raise ValueError('`backend` must be one of "auto", "rust", or "fallback".')
     return backend
+
+
+def is_weighted_or_non_ols_model(model: ModelLike) -> bool:
+    """Return True if model metadata indicates weights or a non-OLS estimator."""
+    if is_pyfixest_model(model):
+        if bool(getattr(model, "_has_weights", False)):
+            return True
+        if getattr(model, "_weights_name", None) is not None:
+            return True
+        if getattr(model, "_method", "feols") != "feols":
+            return True
+        weights = getattr(model, "_weights", None)
+        if weights is not None and not bool(
+            np.all(np.asarray(weights, dtype=float) == 1.0)
+        ):
+            return True
+        return False
+
+    inner = getattr(model, "model", None)
+    if inner is None:
+        return False
+    if isinstance(inner, (SmGLM, SmGLS)) or (
+        isinstance(inner, SmWLS) and not isinstance(inner, SmOLS)
+    ):
+        return True
+    for attr in ("weights", "freq_weights", "var_weights"):
+        vals = getattr(inner, attr, None)
+        if vals is not None and not bool(np.all(np.asarray(vals, dtype=float) == 1.0)):
+            return True
+    return False
 
 
 def validate_nthreads(nthreads: object) -> int | None:
@@ -98,7 +134,7 @@ def compute_orthogonal_projector(
     u, s, _ = np.linalg.svd(x_design, full_matrices=False)
     if s.size == 0 or s[0] <= 0.0:
         return None, None
-    tol = 1e-12 * max(x_design.shape) * s[0]
+    tol = float(np.finfo(np.float64).eps) * max(x_design.shape) * float(s[0])
     keep = s > tol
     if not np.any(keep):
         return None, None
@@ -120,7 +156,7 @@ def scpc(
     large_n_seed: int = 1,
     uncond: bool = False,
     cvs: bool = False,
-    backend: str = "auto",
+    backend: str | None = None,
     nthreads: int | None = None,
 ) -> SCPCResult:
     """Run spatial correlation-robust inference.
@@ -142,7 +178,8 @@ def scpc(
         large_n_seed: Seed for the large-n approximation branch.
         uncond: Whether to skip the conditional adjustment.
         cvs: Whether to return additional critical values.
-        backend: Execution backend (`"auto"`, `"rust"`, or `"fallback"`).
+        backend: Execution backend (`"auto"`, `"rust"`, `"fallback"`, or
+            `None` to consult `SPATIAL_BACKEND`).
         nthreads: Optional thread budget for compiled execution (`None` or >= 1).
 
     Returns:
@@ -163,6 +200,25 @@ def scpc(
         raise ValueError(
             "`scpc()` only accepts a single fitted pyfixest model, not FixestMulti."
         )
+
+    model_has_fe = has_fixest_fe(model)
+    model_is_iv = is_fixest_iv_second_stage(model)
+    model_is_weighted = is_weighted_or_non_ols_model(model)
+
+    if (
+        resolved_backend == "rust"
+        and not is_pyfixest_model(model)
+        and not hasattr(model, "resid")
+    ):
+        if load_rust_backend() is None:
+            raise RuntimeError(
+                "Rust backend requested (`backend='rust'`), but "
+                f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is not installed."
+            )
+        if model_is_weighted:
+            raise NotImplementedError(
+                "Rust backend does not support weighted or non-OLS models in Milestone 1."
+            )
 
     model_mat = get_scpc_model_matrix(model)
     if is_pyfixest_model(model):
@@ -253,8 +309,9 @@ def scpc(
         method != "approx"
         and (method == "exact" or neff < LARGE_N_THRESHOLD)
         and cluster is None
-        and cond_fixef_id is None
-        and not cond_is_iv
+        and not model_has_fe
+        and not model_is_iv
+        and not model_is_weighted
         and k_use >= 1
     )
 
@@ -274,10 +331,12 @@ def scpc(
                     reasons.append("approximate large-n method")
                 if cluster is not None:
                     reasons.append("clustered inference")
-                if cond_fixef_id is not None:
+                if model_has_fe:
                     reasons.append("absorbed fixed-effect demeaning")
-                if cond_is_iv:
+                if model_is_iv:
                     reasons.append("instrumental variables")
+                if model_is_weighted:
+                    reasons.append("weighted or non-OLS models")
                 if k_use < 1:
                     reasons.append("non-positive ncoef")
                 raise NotImplementedError(
@@ -338,6 +397,7 @@ def scpc(
                     method="exact",
                     large_n_seed=large_n_seed,
                     backend="rust",
+                    tied=bool(rust_res["tied"]),
                 )
 
     spc = set_oms_wfin(
@@ -373,14 +433,17 @@ def scpc(
         wj = neff * (bread_inv[j, :] @ s.T) + coef[j]
         wj_perm = wj[perm]
 
-        tau_u = (
-            math.sqrt(q)
-            * np.dot(wfin[:, 0], wj_perm)
-            / math.sqrt(np.sum((wfin[:, 1:].T @ wj_perm) ** 2))
-        )
-        se = math.sqrt(np.sum((wfin[:, 1:].T @ wj_perm) ** 2)) / (
-            math.sqrt(q) * math.sqrt(neff)
-        )
+        wj_norm = float(np.linalg.norm(wj_perm))
+        denom = math.sqrt(float(np.sum((wfin[:, 1:].T @ wj_perm) ** 2)))
+        if (
+            not math.isfinite(denom)
+            or not math.isfinite(wj_norm)
+            or wj_norm == 0.0
+            or denom <= 1e-12 * wj_norm
+        ):
+            raise ValueError("SCPC variance projection is degenerate.")
+        tau_u = math.sqrt(q) * float(np.dot(wfin[:, 0], wj_perm)) / denom
+        se = denom / (math.sqrt(q) * math.sqrt(neff))
         p_u = max_rp(omsfin, q, abs(tau_u) / math.sqrt(q))[0]
 
         if not uncond:
@@ -500,4 +563,5 @@ def scpc(
         method=spc.method,
         large_n_seed=large_n_seed,
         backend="fallback",
+        tied=spc.tied,
     )

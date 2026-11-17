@@ -3,9 +3,18 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.sparse.linalg import eigsh
+from scipy.sparse.linalg import ArpackError, eigsh
 
 from ..types import ArrayLike, MatrixLike
+
+
+def has_tied_eigenvalues(values: ArrayLike) -> bool:
+    """Return True if consecutive descending eigenvalues exhibit a numerical tie."""
+    vals = np.asarray(values, dtype=np.float64)
+    if vals.size < 2:
+        return False
+    tol = 1.6e-11 * max(abs(float(vals[0])), 1.0)
+    return bool(np.any(vals[:-1] - vals[1:] <= tol))
 
 
 def lvech(mat: MatrixLike) -> ArrayLike:
@@ -47,6 +56,51 @@ def demeanmat(mat: MatrixLike) -> MatrixLike:
     return mat
 
 
+def get_w_with_ties(
+    distmat: MatrixLike, c0: float, qmax: int
+) -> tuple[MatrixLike, bool]:
+    """Build the candidate spatial projection basis and detect leading ties."""
+    distmat = np.asarray(distmat, dtype=np.float64)
+    n = distmat.shape[0]
+    if n < 2 or qmax < 1 or qmax >= n:
+        raise ValueError("SCPC basis requires n >= 2 and 1 <= qmax < n.")
+
+    m = n - 1
+    root_n = math.sqrt(n)
+    sig = np.exp(-c0 * distmat)
+    row_sums = np.sum(sig, axis=1)
+    proj = (row_sums / root_n + sig[:, m]) / (root_n + 1.0)
+    common = (float(np.sum(proj)) / root_n + float(proj[m])) / (root_n + 1.0)
+    cov = sig[:m, :m] + common - proj[:m, None] - proj[None, :m]
+
+    k_check = min(qmax + 1, m)
+    vecs_sub: np.ndarray | None = None
+    evals_check: np.ndarray | None = None
+    if n > 512 and k_check < m:
+        try:
+            eigvals, vecs = eigsh(cov, k=k_check, which="LA")
+            order = np.argsort(eigvals)[::-1]
+            evals_check = eigvals[order]
+            if not has_tied_eigenvalues(evals_check):
+                vecs_sub = vecs[:, order[:qmax]]
+        except ArpackError:
+            vecs_sub = None
+
+    if vecs_sub is None or evals_check is None:
+        eigvals, vecs = np.linalg.eigh(cov)
+        order = np.argsort(eigvals)[::-1]
+        evals_check = eigvals[order[:k_check]]
+        vecs_sub = vecs[:, order[:qmax]]
+
+    tied = has_tied_eigenvalues(evals_check)
+    col_sums = np.sum(vecs_sub, axis=0)
+    w = np.empty((n, qmax + 1), dtype=np.float64)
+    w[:, 0] = 1.0 / root_n
+    w[:m, 1:] = vecs_sub - col_sums[None, :] / (root_n * (root_n + 1.0))
+    w[m, 1:] = -col_sums / root_n
+    return w, tied
+
+
 def get_w(distmat: MatrixLike, c0: float, qmax: int) -> MatrixLike:
     """Build the candidate spatial projection basis.
 
@@ -62,22 +116,7 @@ def get_w(distmat: MatrixLike, c0: float, qmax: int) -> MatrixLike:
     Returns:
         The candidate spatial projection matrix.
     """
-    distmat = np.asarray(distmat, dtype=float)
-    n = distmat.shape[0]
-    sig = np.exp(-c0 * distmat)
-    sig_d = demeanmat(sig)
-
-    if qmax < n - 1:
-        eigvals, v = eigsh(sig_d, k=qmax, which="LM")
-        order = np.argsort(np.abs(eigvals))[::-1]
-        v = v[:, order]
-    else:
-        eigvals, v = np.linalg.eigh(sig_d)
-        order = np.argsort(eigvals)[::-1]
-        v = v[:, order[:qmax]]
-
-    # prepend the normalized constant direction, matching the R code
-    return np.column_stack((np.full(n, 1 / math.sqrt(n)), v))
+    return get_w_with_ties(distmat, c0, qmax)[0]
 
 
 def get_tau(y: ArrayLike, w: MatrixLike) -> float:
@@ -358,8 +397,20 @@ def orthogonalize_w(
             raise ValueError("Fixed-effect demeaning is not implemented.")
 
         # Conditional OLS denominator weights are S_x M_V D_x B_q.
+        pre_max = float(np.max(np.linalg.norm(rx, axis=0))) if rx.size > 0 else 0.0
+        if not math.isfinite(pre_max) or pre_max == 0.0:
+            raise ValueError(
+                "Conditional projection collapsed all non-constant W columns."
+            )
         rr = rx - x @ np.linalg.lstsq(x, rx, rcond=None)[0]
         wx[:, 1:] = rr * xjs[:, None]
+        post_norms = np.linalg.norm(wx[:, 1:], axis=0)
+        if not np.isfinite(post_norms).all() or bool(
+            np.all(post_norms <= 1e-12 * pre_max)
+        ):
+            raise ValueError(
+                "Conditional projection collapsed all non-constant W columns."
+            )
 
     return wx
 
