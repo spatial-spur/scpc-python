@@ -5,6 +5,8 @@ import math
 import os
 from pathlib import Path
 import signal
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -16,10 +18,14 @@ import pyfixest as pf
 import pytest
 import statsmodels.formula.api as smf
 
-from scpc import scpc
+from scpc import InvalidSampledCovarianceError, scpc
 from scpc.core import load_rust_backend
 from scpc.utils.matrix import lvech
-from scpc.utils.spatial import get_avc, get_distmat, get_rp
+from scpc.utils.spatial import (
+    get_avc,
+    get_distmat,
+    get_rp,
+)
 from tests.utils import (
     make_basic_iv_data,
     make_clustered_fe_iv_data,
@@ -28,9 +34,8 @@ from tests.utils import (
     make_two_way_fe_iv_data,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = REPO_ROOT / "verification" / "data"
-FIXTURE_PATH = REPO_ROOT / "spatial-rust" / "fixtures" / "m1_exact_scpc.json"
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "rust_core"
+
 
 M1_CASES = [
     ("bench_200_euclid_cond", "bench_200.csv", False, False, True),
@@ -42,23 +47,23 @@ M1_CASES = [
 ]
 
 
-HAS_MONOREPO_FIXTURES = (
-    FIXTURE_PATH.exists()
-    and (DATA_DIR / "bench_200.csv").exists()
-    and (DATA_DIR / "bench_1000.csv").exists()
-)
-
-
 def rust_available() -> bool:
     return load_rust_backend() is not None
 
 
+def require_rust() -> Any:
+    rust_mod = load_rust_backend()
+    if rust_mod is None:
+        pytest.skip()
+    return rust_mod
+
+
 def load_fixtures() -> dict[str, Any]:
-    return json.loads(FIXTURE_PATH.read_text())
+    return json.loads((FIXTURE_DIR / "m1_exact_scpc.json").read_text())
 
 
 def load_bench_df(csv_name: str) -> pd.DataFrame:
-    return pd.read_csv(DATA_DIR / csv_name)
+    return pd.read_csv(FIXTURE_DIR / csv_name)
 
 
 @pytest.mark.parametrize("engine", ["statsmodels", "pyfixest"])
@@ -139,8 +144,8 @@ def make_direct_ffi_inputs() -> tuple[
 
 
 def test_spatial_spur_rust_api_version_fortran_layout_and_validation() -> None:
-    rust_mod: Any = pytest.importorskip("spatial_spur_rust")
-    assert rust_mod.API_VERSION == 5
+    rust_mod: Any = require_rust()
+    assert rust_mod.API_VERSION == 6
 
     coords, coef, wj, xj, xjs, u = make_direct_ffi_inputs()
 
@@ -209,7 +214,7 @@ def test_spatial_spur_rust_api_version_fortran_layout_and_validation() -> None:
 
 
 def test_rust_ffi_arbitrary_strides_unaligned_and_sliced_views() -> None:
-    rust_mod: Any = pytest.importorskip("spatial_spur_rust")
+    rust_mod: Any = require_rust()
     coords, coef, wj, xj, xjs, u = make_direct_ffi_inputs()
 
     ref = rust_mod.run_exact_scpc(
@@ -313,23 +318,10 @@ def test_rust_ffi_arbitrary_strides_unaligned_and_sliced_views() -> None:
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork not available")
 def test_rust_fork_safety_after_warming_threads() -> None:
-    rust_mod: Any = pytest.importorskip("spatial_spur_rust")
+    rust_mod: Any = require_rust()
     coords, coef, wj, xj, xjs, u = make_direct_ffi_inputs()
 
-    # Warm both serial and multi-threaded pool paths in the parent process.
-    ref1 = rust_mod.run_exact_scpc(
-        coords,
-        coef,
-        wj,
-        0.1,
-        uncond=False,
-        cvs=True,
-        xj=xj,
-        xjs=xjs,
-        proj_u=u,
-        proj_v=u,
-        nthreads=1,
-    )
+    # Initialize the native pool in the parent before forking.
     rust_mod.run_exact_scpc(
         coords,
         coef,
@@ -347,7 +339,7 @@ def test_rust_fork_safety_after_warming_threads() -> None:
     pid = os.fork()
     if pid == 0:
         try:
-            child_res = rust_mod.run_exact_scpc(
+            rust_mod.run_exact_scpc(
                 coords,
                 coef,
                 wj,
@@ -360,15 +352,13 @@ def test_rust_fork_safety_after_warming_threads() -> None:
                 proj_v=u,
                 nthreads=1,
             )
-            if child_res["q"] != ref1["q"]:
-                os._exit(2)
-            if not np.allclose(
-                child_res["scpcstats"], ref1["scpcstats"], atol=1e-14, rtol=0.0
-            ):
-                os._exit(3)
-            os._exit(0)
-        except BaseException:
+        except RuntimeError as err:
+            if "spawn" in str(err) and "forkserver" in str(err):
+                os._exit(0)
             os._exit(1)
+        except BaseException:
+            os._exit(2)
+        os._exit(3)
 
     deadline = time.monotonic() + 10.0
     status: int | None = None
@@ -390,7 +380,45 @@ def test_rust_fork_safety_after_warming_threads() -> None:
     assert os.waitstatus_to_exitcode(status) == 0
 
 
-@pytest.mark.skipif(not HAS_MONOREPO_FIXTURES, reason="monorepo fixtures not available")
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork not available")
+def test_structural_invalid_native_call_does_not_poison_fork() -> None:
+    require_rust()
+    # Each subprocess starts with fresh native state, independent of test order.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from multiprocessing import get_context
+from tests.test_rust_m1 import make_direct_ffi_inputs, require_rust
+
+native = require_rust()
+coords, coef, scores, *_ = make_direct_ffi_inputs()
+try:
+    native.run_exact_scpc(coords, coef, scores[:-1], 0.1, uncond=True)
+except ValueError:
+    pass
+else:
+    raise AssertionError("Invalid score shape was accepted")
+
+def run_valid():
+    native.run_exact_scpc(coords, coef, scores, 0.1, uncond=True, nthreads=1)
+
+child = get_context("fork").Process(target=run_valid)
+child.start()
+child.join(8)
+if child.is_alive():
+    child.kill()
+    child.join()
+    raise AssertionError("Child timed out after an invalid parent call")
+assert child.exitcode == 0, child.exitcode
+""",
+        ],
+        check=True,
+        timeout=30,
+    )
+
+
 @pytest.mark.parametrize(
     ("case_name", "csv_name", "latlong", "uncond", "cvs"), M1_CASES
 )
@@ -488,13 +516,12 @@ def test_m1_fixtures_parity_rust_vs_fallback_and_baseline(
             assert res_rust.scpccvs is None
 
 
-@pytest.mark.skipif(not HAS_MONOREPO_FIXTURES, reason="monorepo fixtures not available")
 @pytest.mark.parametrize("latlong", [False, True])
 @pytest.mark.parametrize(("uncond", "cvs"), [(True, True), (False, False)])
 def test_m1_additional_uncond_and_cvs_combinations(
     latlong: bool, uncond: bool, cvs: bool
 ) -> None:
-    pytest.importorskip("spatial_spur_rust")
+    require_rust()
     df = load_bench_df("bench_200.csv")
     fit = smf.ols("y ~ x1 + x2", data=df).fit()
     coord_kwargs: dict[str, Any] = (
@@ -524,9 +551,8 @@ def test_m1_additional_uncond_and_cvs_combinations(
         assert res_rust.scpccvs is None
 
 
-@pytest.mark.skipif(not HAS_MONOREPO_FIXTURES, reason="monorepo fixtures not available")
 def test_rust_nthreads_1_runs_rust_and_matches_nthreads_4_and_fallback() -> None:
-    pytest.importorskip("spatial_spur_rust")
+    require_rust()
     df = load_bench_df("bench_200.csv")
     fit = smf.ols("y ~ x1 + x2", data=df).fit()
 
@@ -573,7 +599,6 @@ def test_rust_nthreads_1_runs_rust_and_matches_nthreads_4_and_fallback() -> None
     npt.assert_allclose(res_1.scpccvs, res_fb.scpccvs, atol=1e-10, rtol=0.0)
 
 
-@pytest.mark.skipif(not HAS_MONOREPO_FIXTURES, reason="monorepo fixtures not available")
 def test_scale_invariant_calibration_and_colocation_floor() -> None:
     df_full = load_bench_df("bench_200.csv")
     df_30 = df_full.iloc[:30].copy()
@@ -750,7 +775,7 @@ def test_near_zero_t_statistic_probability() -> None:
         assert res_rust.scpcstats[0, 3] == pytest.approx(expected_p, abs=1e-12, rel=0.0)
         npt.assert_allclose(res_rust.scpcstats, res_fb.scpcstats, atol=1e-12, rtol=0.0)
 
-        rust_mod: Any = pytest.importorskip("spatial_spur_rust")
+        rust_mod: Any = require_rust()
         direct = rust_mod.run_exact_scpc(
             np.array([[0.0], [1.0]]),
             np.array([1e-6]),
@@ -794,7 +819,6 @@ def test_conditional_rank_crossing_matches_fallback() -> None:
         npt.assert_allclose(res_rust.scpccvs, res_fb.scpccvs, rtol=1e-10, atol=1e-12)
 
 
-@pytest.mark.skipif(not HAS_MONOREPO_FIXTURES, reason="monorepo fixtures not available")
 def test_positive_outcome_rescaling_invariance() -> None:
     df = load_bench_df("bench_200.csv")
     fit_base = smf.ols("y ~ x1 + x2", data=df).fit()
@@ -961,6 +985,9 @@ def test_absent_and_incompatible_rust_wheel_handling(
         model, data, coords_euclidean=("coord_x", "coord_y"), backend="auto"
     )
     assert res_bad_abi_auto.backend == "fallback"
+    assert (
+        res_bad_abi_auto.fallback_reason == "missing_or_incompatible_native_extension"
+    )
 
 
 def test_unsupported_modes_raise_on_rust_and_fallback_on_auto(
@@ -1178,7 +1205,9 @@ def test_unsupported_modes_raise_on_rust_and_fallback_on_auto(
             atol=1e-10,
         )
 
-    # 5. Weighted OLS (statsmodels WLS/GLS/GLM and pyfixest weighted OLS)
+
+def test_unsupported_models_fail_for_all_backends() -> None:
+    # Weighted and nonlinear models (statsmodels WLS/GLS/GLM and pyfixest weighted OLS)
     w_data = pd.DataFrame(
         {
             "y": [1.0, 2.1, 2.9, 4.2, 5.1],
@@ -1192,37 +1221,18 @@ def test_unsupported_modes_raise_on_rust_and_fallback_on_auto(
     gls_fit = smf.gls("y ~ x", data=w_data).fit()
     glm_fit = smf.glm("y ~ x", data=w_data).fit()
     pf_w_fit = pf.feols("y ~ x", data=w_data, weights="w")
-    for weighted_fit in (wls_fit, gls_fit, pf_w_fit):
-        if has_rust:
+    for fit in (wls_fit, gls_fit, glm_fit, pf_w_fit):
+        for backend in ("auto", "fallback", "rust"):
             with pytest.raises(NotImplementedError, match="weighted"):
                 scpc(
-                    weighted_fit,
+                    fit,
                     w_data,
                     coords_euclidean=("coord_x", "coord_y"),
                     uncond=True,
-                    backend="rust",
+                    backend=backend,
                 )
-        res_w_auto = scpc(
-            weighted_fit,
-            w_data,
-            coords_euclidean=("coord_x", "coord_y"),
-            uncond=True,
-            backend="auto",
-        )
-        assert res_w_auto.backend == "fallback"
-
-    if has_rust:
-        with pytest.raises(NotImplementedError, match="weighted"):
-            scpc(
-                glm_fit,
-                w_data,
-                coords_euclidean=("coord_x", "coord_y"),
-                uncond=True,
-                backend="rust",
-            )
 
 
-@pytest.mark.skipif(not HAS_MONOREPO_FIXTURES, reason="monorepo fixtures not available")
 def test_1d_coords_ncoef_and_tied_eigenvalues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1382,7 +1392,6 @@ def test_clustered_conditional_ols_cutoffs_and_bench_200_parity(
         )
 
 
-@pytest.mark.skipif(not HAS_MONOREPO_FIXTURES, reason="monorepo fixtures not available")
 @pytest.mark.parametrize("uncond", [False, True])
 @pytest.mark.parametrize("latlong", [False, True])
 def test_clustered_ols_bench_200_rust_vs_fallback_parity(
@@ -1608,7 +1617,7 @@ def test_approx_scpc_pyfixest_iv_and_cluster_parity(
 
 
 @pytest.mark.skipif(not rust_available(), reason="spatial_spur_rust not installed")
-def test_approx_threshold_override_and_tied_auto_fallback() -> None:
+def test_approx_threshold_override_and_tied_dispatch() -> None:
     # n = 4500 triggers approx under auto, while explicit exact overrides the threshold.
     rng = np.random.default_rng(2026)
     n_big = 4500
@@ -1639,7 +1648,8 @@ def test_approx_threshold_override_and_tied_auto_fallback() -> None:
     assert res_exact.backend == "rust"
     assert res_exact.method == "exact"
 
-    # Tied/degenerate landmark eigenspace in approx falls back cleanly under auto.
+    # A tied native basis may use the fallback, whose sampled grid still has
+    # to satisfy the same covariance validity checks.
     n_tie = 20
     s1_tie = np.concatenate([np.zeros(10), np.ones(10)])
     s2_tie = np.zeros(n_tie)
@@ -1648,7 +1658,7 @@ def test_approx_threshold_override_and_tied_auto_fallback() -> None:
     df_tie = pd.DataFrame({"y": y_tie, "x": x_tie, "s1": s1_tie, "s2": s2_tie})
     fit_tie = smf.ols("y ~ x", data=df_tie).fit()
 
-    with pytest.raises(RuntimeError, match="tied eigenspace"):
+    with pytest.raises(require_rust().TiedEigenspaceError, match="tied eigenspace"):
         scpc(
             fit_tie,
             df_tie,
@@ -1657,13 +1667,51 @@ def test_approx_threshold_override_and_tied_auto_fallback() -> None:
             method="approx",
             backend="rust",
         )
-    res_tie_auto = scpc(
-        fit_tie,
-        df_tie,
-        coords_euclidean=("s1", "s2"),
-        avc=0.5,
-        method="approx",
-        backend="auto",
+    with pytest.raises(InvalidSampledCovarianceError, match="method='exact'"):
+        scpc(
+            fit_tie,
+            df_tie,
+            coords_euclidean=("s1", "s2"),
+            avc=0.5,
+            method="approx",
+            backend="auto",
+        )
+
+
+def test_invalid_sampled_covariance_stops_public_approximation() -> None:
+    i = np.arange(8, dtype=float)
+    data = pd.DataFrame({"x": i, "y": np.cos(i), "sx": i, "sy": np.sin(i)})
+    fit = smf.ols("y ~ x", data=data).fit()
+    backends = (
+        ("fallback", "rust", "auto") if rust_available() else ("fallback", "auto")
     )
-    assert res_tie_auto.backend == "fallback"
-    assert res_tie_auto.method == "approx"
+    for backend in backends:
+        common: dict[str, Any] = dict(
+            coords_euclidean=("sx", "sy"),
+            avc=0.95,
+            uncond=True,
+            nthreads=1,
+            backend=backend,
+        )
+        with pytest.raises(InvalidSampledCovarianceError, match="method='exact'"):
+            scpc(fit, data, method="approx", **common)
+        exact = scpc(fit, data, method="exact", **common)
+        assert np.isfinite(exact.scpcstats).all()
+
+
+def test_native_tied_approximation_can_use_valid_fallback() -> None:
+    rust_mod = require_rust()
+    data = pd.DataFrame({"sx": [0, 0, 1, 1], "sy": [0, 1, 1, 0], "y": [0, 1, 3, 5]})
+    fit = smf.ols("y ~ 1", data=data).fit()
+    common: dict[str, Any] = dict(
+        coords_euclidean=("sx", "sy"),
+        avc=0.2,
+        uncond=True,
+        nthreads=1,
+        method="approx",
+    )
+    with pytest.raises(rust_mod.TiedEigenspaceError):
+        scpc(fit, data, backend="rust", **common)
+    result = scpc(fit, data, backend="auto", **common)
+    assert result.backend == "fallback" and result.tied
+    assert result.fallback_reason == "tied_eigenspace"

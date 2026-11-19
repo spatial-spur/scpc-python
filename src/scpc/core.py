@@ -8,10 +8,7 @@ from typing import Any
 import warnings
 
 import numpy as np
-from statsmodels.genmod.generalized_linear_model import GLM as SmGLM
-from statsmodels.regression.linear_model import GLS as SmGLS
 from statsmodels.regression.linear_model import OLS as SmOLS
-from statsmodels.regression.linear_model import WLS as SmWLS
 
 from .types import DataFrameLike, MatrixLike, ModelLike, SCPCResult
 from .utils.data import (
@@ -30,12 +27,15 @@ from .utils.data import (
     resolve_coords_input,
 )
 from .utils.matrix import (
+    iv_projector_factors,
+    orthonormal_design_span,
     orthogonalize_w,
     orthogonalize_w_cluster,
     orthogonalize_w_cluster_iv,
     orthogonalize_w_iv,
 )
 from .utils.spatial import (
+    InvalidSampledCovarianceError,
     LARGE_N_CAPM,
     LARGE_N_CAPN,
     LARGE_N_M,
@@ -51,7 +51,7 @@ from .utils.spatial import (
 )
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
-RUST_API_VERSION = 5
+RUST_API_VERSION = 6
 
 
 def resolve_backend(backend: object) -> str:
@@ -75,7 +75,7 @@ def is_weighted_or_non_ols_model(model: ModelLike) -> bool:
             return True
         if getattr(model, "_weights_name", None) is not None:
             return True
-        if getattr(model, "_method", "feols") != "feols":
+        if (getattr(model, "_method", None) or "feols") != "feols":
             return True
         weights = getattr(model, "_weights", None)
         if weights is not None and not bool(
@@ -85,11 +85,7 @@ def is_weighted_or_non_ols_model(model: ModelLike) -> bool:
         return False
 
     inner = getattr(model, "model", None)
-    if inner is None:
-        return False
-    if isinstance(inner, (SmGLM, SmGLS)) or (
-        isinstance(inner, SmWLS) and not isinstance(inner, SmOLS)
-    ):
+    if not isinstance(inner, SmOLS):
         return True
     for attr in ("weights", "freq_weights", "var_weights"):
         vals = getattr(inner, attr, None)
@@ -137,14 +133,10 @@ def compute_orthogonal_projector(
         )
     if x_design.shape[1] == 0:
         return None, None
-    u, s, _ = np.linalg.svd(x_design, full_matrices=False)
-    if s.size == 0 or s[0] <= 0.0:
+    proj = orthonormal_design_span(x_design)
+    if proj.shape[1] == 0:
         return None, None
-    tol = float(np.finfo(np.float64).eps) * max(x_design.shape) * float(s[0])
-    keep = s > tol
-    if not np.any(keep):
-        return None, None
-    proj = np.ascontiguousarray(u[:, keep], dtype=np.float64)
+    proj = np.ascontiguousarray(proj, dtype=np.float64)
     return proj, proj
 
 
@@ -153,18 +145,11 @@ def compute_iv_projector(
     z_iv: MatrixLike,
     *,
     tol: float = 1e-10,
+    demean=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute oblique `(U, V)` factors for `A -> A - X (X' P_Z X)^{-1} X' P_Z A`."""
-    x = np.asarray(x_iv, dtype=np.float64)
-    z = np.asarray(z_iv, dtype=np.float64)
-    qz, _ = np.linalg.qr(z, mode="reduced")
-    pzx = qz @ (qz.T @ x)
-    gram = x.T @ pzx
-    if np.linalg.matrix_rank(gram, tol=tol) < gram.shape[1]:
-        raise ValueError("IV residualizer is rank deficient: X'P_ZX is not full rank.")
-    proj_u = np.ascontiguousarray(x, dtype=np.float64)
-    proj_v = np.ascontiguousarray(np.linalg.solve(gram, pzx.T).T, dtype=np.float64)
-    return proj_u, proj_v
+    u, v = iv_projector_factors(x_iv, z_iv, tol=tol, demean=demean)
+    return np.ascontiguousarray(u), np.ascontiguousarray(v)
 
 
 def scpc(
@@ -228,24 +213,20 @@ def scpc(
 
     model_has_fe = has_fixest_fe(model)
     model_is_iv = is_fixest_iv_second_stage(model)
-    model_is_weighted = is_weighted_or_non_ols_model(model)
+    if is_weighted_or_non_ols_model(model):
+        raise NotImplementedError(
+            "SCPC does not support weighted or non-OLS/2SLS fits. "
+            "Pass an unweighted OLS or supported PyFixest 2SLS fit."
+        )
 
-    if (
-        resolved_backend == "rust"
-        and not is_pyfixest_model(model)
-        and not hasattr(model, "resid")
-    ):
-        if load_rust_backend() is None:
-            raise RuntimeError(
-                "Rust backend requested (`backend='rust'`), but "
-                f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is not installed."
-            )
-        if model_is_weighted:
-            raise NotImplementedError(
-                "Rust backend does not support weighted or non-OLS models in Milestone 1."
-            )
+    rust_mod = load_rust_backend() if resolved_backend != "fallback" else None
+    if resolved_backend == "rust" and rust_mod is None:
+        raise RuntimeError(
+            "Rust backend requested (`backend='rust'`), but a compatible "
+            f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is unavailable. "
+            "Install spatial-spur-rust >= 0.2.3 or use backend='fallback'."
+        )
 
-    model_mat = get_scpc_model_matrix(model)
     if is_pyfixest_model(model):
         s = np.asarray(get_fixest_score_matrix(model), dtype=float)
         bread_inv = np.asarray(get_fixest_bread_inv(model), dtype=float)
@@ -260,23 +241,30 @@ def scpc(
     p = s.shape[1]
     neff = n
 
-    if model_mat.shape[0] != n:
-        raise ValueError(
-            "Model matrix row count does not match score matrix row count."
+    iv_design = None
+    model_mat_cond = None
+    cond_include_intercept = False
+    cond_fixef_id = None
+    cond_residualize = None
+    if not uncond:
+        iv_design = get_fixest_iv_design(model) if model_is_iv else None
+        model_mat = (
+            get_scpc_model_matrix(model)
+            if iv_design is None
+            else iv_design["model_mat"]
         )
-
-    cond_setup = get_conditional_projection_setup(model, model_mat, n=n, uncond=uncond)
-    model_mat_cond = np.asarray(cond_setup.model_mat, dtype=float)
-    cond_include_intercept = cond_setup.include_intercept
-    cond_fixef_id = cond_setup.fixef_id
-    cond_residualize = cond_setup.residualize
-
-    if model_mat_cond.shape != (n, p):
-        raise ValueError(
-            "Conditional projection matrix dimensions are incompatible with model "
-            f"coefficients (rows = {model_mat_cond.shape[0]}, cols = {model_mat_cond.shape[1]}, "
-            f"expected {n} x {p})."
+        cond_setup = get_conditional_projection_setup(
+            model, model_mat, n=n, uncond=False, iv_design=iv_design
         )
+        model_mat_cond = np.asarray(cond_setup.model_mat, dtype=float)
+        cond_include_intercept = cond_setup.include_intercept
+        cond_fixef_id = cond_setup.fixef_id
+        cond_residualize = cond_setup.residualize
+        if model_mat_cond.shape != (n, p):
+            raise ValueError(
+                f"Conditional projection has shape {model_mat_cond.shape}, "
+                f"but the score matrix has shape {(n, p)}."
+            )
 
     obs_index = get_obs_index(model, data)
     coord_info = resolve_coords_input(data, obs_index, lon, lat, coords_euclidean)
@@ -348,30 +336,25 @@ def scpc(
         else "exact"
     )
     is_rust_eligible = (
-        method_actual in {"exact", "approx"}
-        and not fe_multiway
-        and not model_is_weighted
-        and k_use >= 1
+        method_actual in {"exact", "approx"} and not fe_multiway and k_use >= 1
     )
 
+    fallback_reason = None
     if resolved_backend != "fallback":
-        rust_mod = load_rust_backend()
-        if resolved_backend == "rust":
-            if rust_mod is None:
-                raise RuntimeError(
-                    "Rust backend requested (`backend='rust'`), but "
-                    f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is not installed."
+        if rust_mod is None:
+            fallback_reason = "missing_or_incompatible_native_extension"
+        elif not is_rust_eligible:
+            fallback_reason = (
+                "multiway_fixed_effects" if fe_multiway else "non_positive_ncoef"
+            )
+            if resolved_backend == "rust":
+                detail = (
+                    "multi-way absorbed fixed-effect demeaning"
+                    if fe_multiway
+                    else "non-positive ncoef"
                 )
-            if not is_rust_eligible:
-                reasons: list[str] = []
-                if fe_multiway:
-                    reasons.append("multi-way absorbed fixed-effect demeaning")
-                if model_is_weighted:
-                    reasons.append("weighted or non-OLS models")
-                if k_use < 1:
-                    reasons.append("non-positive ncoef")
                 raise NotImplementedError(
-                    "Rust backend does not support " + ", ".join(reasons) + " yet."
+                    f"Rust backend does not support {detail} yet."
                 )
 
         if rust_mod is not None and is_rust_eligible:
@@ -380,7 +363,7 @@ def scpc(
                 neff * (s @ bread_inv[:k_use, :].T) + coef_use[None, :],
                 dtype=np.float64,
             )
-            if uncond:
+            if model_mat_cond is None:
                 rust_xj = None
                 rust_xjs = None
                 proj_u = None
@@ -411,27 +394,15 @@ def scpc(
                     )
                     cl_arg = np.ascontiguousarray(cl_idx, dtype=np.int64)
                 else:
-                    xjs_mat = np.ascontiguousarray(np.sign(xj_mat), dtype=np.float64)
+                    xjs_mat = np.where(xj_mat < 0.0, -1.0, 1.0)
                     cl_arg = None
 
-                if model_is_iv:
-                    design = get_fixest_iv_design(model)
-                    x_iv = np.asarray(design["X"], dtype=np.float64)
-                    z_iv = np.asarray(design["Z"], dtype=np.float64)
-                    if model_has_fe:
-                        demean = make_pyfixest_demeaner(model)
-                        x_iv = np.asarray(
-                            demean(x_iv, context="IV residualizer X"),
-                            dtype=np.float64,
-                        )
-                        z_iv = np.asarray(
-                            demean(z_iv, context="IV residualizer Z"),
-                            dtype=np.float64,
-                        )
-                        fe_arg = fe_id_0based
-                    else:
-                        fe_arg = None
-                    proj_v, proj_u = compute_iv_projector(x_iv, z_iv)
+                if iv_design is not None:
+                    demean = make_pyfixest_demeaner(model) if model_has_fe else None
+                    fe_arg = fe_id_0based
+                    proj_v, proj_u = compute_iv_projector(
+                        iv_design["X"], iv_design["Z"], demean=demean
+                    )
                     rust_xj = xj_mat
                     rust_xjs = xjs_mat
                 else:
@@ -501,14 +472,15 @@ def scpc(
                         samples=LARGE_N_CAPN,
                         pair_count=LARGE_N_CAPM,
                     )
-                except RuntimeError as exc:
-                    if (
-                        "tied eigenspace" in str(exc).lower()
-                        and resolved_backend == "auto"
-                    ):
-                        rust_res = None
-                    else:
+                except rust_mod.InvalidSampledCovarianceError as error:
+                    raise InvalidSampledCovarianceError(
+                        f"{error}. Try method='exact'."
+                    ) from error
+                except rust_mod.TiedEigenspaceError:
+                    if resolved_backend != "auto":
                         raise
+                    rust_res = None
+                    fallback_reason = "tied_eigenspace"
             else:
                 coords_mat = np.ascontiguousarray(coords, dtype=np.float64)
                 rust_res = rust_mod.run_exact_scpc(
@@ -547,6 +519,8 @@ def scpc(
                     backend="rust",
                     tied=bool(rust_res["tied"]),
                 )
+            if rust_res is not None and rust_res["tied"]:
+                fallback_reason = "tied_eigenspace"
 
     spc = set_oms_wfin(
         coords,
@@ -617,7 +591,7 @@ def scpc(
         se = denom / (math.sqrt(q) * math.sqrt(neff))
         p_u = max_rp(omsfin, q, abs(tau_u) / math.sqrt(q))[0]
 
-        if not uncond:
+        if model_mat_cond is not None:
             if cluster is not None and cl_idx is not None:
                 if cl_values is None or cl_levels is None:
                     raise ValueError(
@@ -655,7 +629,7 @@ def scpc(
             else:
                 xj = neff * (bread_inv[j, :] @ model_mat_cond.T)
                 xj = xj[perm]
-                xjs = np.sign(xj)
+                xjs = np.where(xj < 0.0, -1.0, 1.0)
                 if cond_residualize_use is not None:
                     wx = orthogonalize_w_iv(
                         wfin,
@@ -681,7 +655,7 @@ def scpc(
                     spc.cmax,
                     wx,
                     1.2,
-                    capM=1_000_000,
+                    capM=LARGE_N_CAPM,
                     random_t=large_n_random_state
                     if large_n_random_state is not None
                     else 1,
@@ -734,5 +708,6 @@ def scpc(
         method=spc.method,
         large_n_seed=large_n_seed,
         backend="fallback",
-        tied=spc.tied,
+        tied=spc.tied or fallback_reason == "tied_eigenspace",
+        fallback_reason=fallback_reason,
     )

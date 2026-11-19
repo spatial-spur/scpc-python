@@ -4,6 +4,7 @@ from types import ModuleType
 from typing import Any
 from .core import scpc
 from .types import SCPCResult
+from .utils.spatial import InvalidSampledCovarianceError
 
 
 class SCPC(ModuleType):
@@ -16,4 +17,4 @@ class SCPC(ModuleType):
 module = sys.modules[__name__]
 module.__class__ = SCPC
 
-__all__ = ["scpc", "SCPCResult"]
+__all__ = ["scpc", "SCPCResult", "InvalidSampledCovarianceError"]

@@ -114,6 +114,8 @@ class SCPCResult:
     """Execution backend actually used: `rust` or `fallback`."""
     tied: bool = False
     """Whether the leading spatial eigenspace had a numerical tie."""
+    fallback_reason: str | None = None
+    """Reason a requested automatic native run fell back."""
 
     def __repr__(self) -> str:
         """Return a developer-oriented representation of the result.

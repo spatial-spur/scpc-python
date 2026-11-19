@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pyfixest as pf
 import pytest
+import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
 from scpc.utils.data import get_obs_index
@@ -165,3 +166,15 @@ def test_python_r_parity_get_obs_index_for_pyfixest() -> None:
     py_value = get_obs_index(model, data)
 
     assert list(py_value) == r_value
+
+
+def test_get_obs_index_aligns_unlabeled_statsmodels_design_by_position() -> None:
+    data = pd.DataFrame(
+        {"y": [2.0, 3.1, 4, 5.5], "x": [0.0, 1.0, np.nan, 3.0]},
+        index=["a", "b", "c", "d"],
+    )
+    x = np.column_stack((np.ones(len(data)), data["x"].to_numpy()))
+    model = sm.OLS(data["y"].to_numpy(), x, missing="drop").fit()
+    assert list(get_obs_index(model, data)) == [1, 2, 4]
+    with pytest.raises(ValueError, match="align"):
+        get_obs_index(model, data.iloc[:2])

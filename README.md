@@ -28,8 +28,27 @@ uv pip install spur-python
 ```
 
 Conditional OLS calibration uses the fitted design and the projection order in
-Müller and Watson (2023), §5.1. The optional Rust backend requires
-`spatial-spur-rust>=0.2.1`.
+Müller and Watson (2023), §5.1. SCPC supports unweighted OLS and PyFixest
+2SLS fits. Weighted and other model types raise an error on every backend.
+
+Use `backend="auto"` (the default), `"rust"`, or `"fallback"` to select
+execution. `SPATIAL_BACKEND` applies when you omit the argument. The result's
+`backend` reports the backend that ran, and `fallback_reason` records an
+automatic change. Set `nthreads=1` for single-threaded Rust execution. In
+multiprocessing code that initializes native threads before starting workers,
+use the `spawn` or `forkserver` start method.
+
+The Rust backend in this development branch requires SCPC API 6
+(`spatial-spur-rust` 0.2.3). To test it before the compatible wheel is
+published, build and install it from the matching shared-core checkout.
+
+```bash
+uv pip install ../spatial-rust/crates/spatial-py
+```
+
+Approximate SCPC raises `scpc.InvalidSampledCovarianceError` if its sampled
+covariance matrix is asymmetric or materially indefinite. For samples that fit
+in memory, request `method="exact"` to compute the unsampled covariance.
 
 ## Basic Usage
 

@@ -151,6 +151,8 @@ def coerce_numeric_matrix(a: MatrixLike, arg: str) -> tuple[np.ndarray, bool]:
     a = np.asarray(a, dtype=float)
     if a.ndim == 1:
         a = a[:, None]
+    if a.ndim != 2:
+        raise ValueError(f"{arg} must be a vector or matrix.")
     if a.shape[0] == 0:
         raise ValueError(f"{arg} must have at least one row.")
     if not np.isfinite(a).all():
@@ -161,6 +163,68 @@ def coerce_numeric_matrix(a: MatrixLike, arg: str) -> tuple[np.ndarray, bool]:
 def restore_residualizer_shape(a: np.ndarray, vec_input: bool) -> np.ndarray:
     """Restore vector inputs to a one-dimensional result."""
     return a[:, 0] if vec_input else a
+
+
+def scale_design_columns(design: np.ndarray) -> np.ndarray:
+    """Equilibrate nonzero design columns without changing their span."""
+    scales = np.max(np.abs(design), axis=0)
+    return np.divide(design, scales, out=np.zeros_like(design), where=scales > 0)
+
+
+def orthonormal_design_span(
+    design: np.ndarray, *, tol: float | None = None
+) -> np.ndarray:
+    """Return an orthonormal basis for the span of the design."""
+    if design.shape[1] == 0:
+        return design
+    u, singular, _ = np.linalg.svd(scale_design_columns(design), full_matrices=False)
+    relative_tol = np.finfo(float).eps * max(design.shape) if tol is None else tol
+    return u[:, singular > relative_tol * singular[0]]
+
+
+def iv_projector_factors(
+    x_iv: MatrixLike, z_iv: MatrixLike, *, tol: float = 1e-10, demean=None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return equilibrated factors X and V for the IV residualizer I - XV'."""
+    x, _ = coerce_numeric_matrix(x_iv, "IV residualizer X")
+    z, _ = coerce_numeric_matrix(z_iv, "IV residualizer Z")
+    if x.shape[0] != z.shape[0]:
+        raise ValueError(
+            "IV residualizer requires X and Z to have the same number of rows."
+        )
+    if demean is not None:
+        x = demean(x, context="IV residualizer X")
+        z = demean(z, context="IV residualizer Z")
+    x = scale_design_columns(x)
+    qz = orthonormal_design_span(z, tol=tol)
+    left, singular, right = np.linalg.svd(qz.T @ x, full_matrices=False)
+    if (
+        singular.size < x.shape[1]
+        or not singular.size
+        or singular[-1] <= tol * singular[0]
+    ):
+        raise ValueError("IV residualizer is rank deficient: X'P_ZX is not full rank.")
+    # X (Q_Z'X)^+ Q_Z' equals the 2SLS hat matrix without its normal equations.
+    return x, (qz @ (left / singular)) @ right
+
+
+def make_ols_residualizer(
+    design: np.ndarray, *, demean=None, require_full_rank: bool = False
+):
+    """Build a conditional OLS residualizer from one equilibrated decomposition."""
+    if demean is not None:
+        design = demean(design, context="OLS residualizer X")
+    qx = orthonormal_design_span(design, tol=1e-10 if require_full_rank else None)
+    if require_full_rank and qx.shape[1] != design.shape[1]:
+        raise ValueError("OLS residualizer is rank deficient.")
+
+    def residualize(values: MatrixLike) -> np.ndarray:
+        centered = np.asarray(values, dtype=float)
+        if demean is not None:
+            centered = demean(centered, context="OLS residualizer W")
+        return centered - qx @ (qx.T @ centered)
+
+    return residualize
 
 
 def make_iv_residualizer(
@@ -193,28 +257,12 @@ def make_iv_residualizer(
     Raises:
         ValueError: If the IV design is malformed or rank deficient.
     """
-    X, _ = coerce_numeric_matrix(X, "IV residualizer X")
-    Z, _ = coerce_numeric_matrix(Z, "IV residualizer Z")
-    if X.shape[0] != Z.shape[0]:
-        raise ValueError(
-            "IV residualizer requires X and Z to have the same number of rows."
-        )
-
-    if demean is not None:
-        # scpcr demeans the raw iv design inside the residualizer when fixed
-        # effects are present, so we do the same here.
-        X = np.asarray(demean(X, context="IV residualizer X"), dtype=float)
-        Z = np.asarray(demean(Z, context="IV residualizer Z"), dtype=float)
-
-    qz, _ = np.linalg.qr(Z, mode="reduced")
-    pzx = qz @ (qz.T @ X)
-    A = X.T @ pzx
-    if np.linalg.matrix_rank(A, tol=tol) < A.shape[1]:
-        raise ValueError("IV residualizer is rank deficient: X'P_ZX is not full rank.")
+    u, v = iv_projector_factors(X, Z, tol=tol, demean=demean)
+    left, right = (v, u) if transpose else (u, v)
 
     def residualize(Y: MatrixLike) -> np.ndarray:
         Y, vec_input = coerce_numeric_matrix(Y, "IV residualizer Y")
-        if Y.shape[0] != X.shape[0]:
+        if Y.shape[0] != u.shape[0]:
             raise ValueError(
                 "IV residualizer received Y with an incompatible row count."
             )
@@ -222,20 +270,22 @@ def make_iv_residualizer(
         if demean is not None:
             Y = np.asarray(demean(Y, context="IV residualizer Y"), dtype=float)
 
-        # project y into the instrument space before taking out the x part.
-        if transpose:
-            coef = np.linalg.solve(A.T, X.T @ Y)
-            return restore_residualizer_shape(Y - pzx @ coef, vec_input)
-        pzy = qz @ (qz.T @ Y)
-        coef = np.linalg.solve(A, X.T @ pzy)
-        if not np.isfinite(coef).all():
-            raise ValueError(
-                "IV residualizer produced non-finite auxiliary coefficients."
-            )
-
-        return restore_residualizer_shape(Y - X @ coef, vec_input)
+        return restore_residualizer_shape(Y - left @ (right.T @ Y), vec_input)
 
     return residualize
+
+
+def validate_conditional_denominator(before: np.ndarray, after: np.ndarray) -> None:
+    """Reject conditional spatial bases with no informative denominator direction."""
+    pre_max = float(np.max(np.linalg.norm(before, axis=0)))
+    post = np.linalg.norm(after, axis=0)
+    if (
+        not math.isfinite(pre_max)
+        or pre_max == 0.0
+        or not np.isfinite(post).all()
+        or np.all(post <= 1e-12 * pre_max)
+    ):
+        raise ValueError("Conditional projection collapsed all non-constant W columns.")
 
 
 def orthogonalize_w_iv(
@@ -282,6 +332,7 @@ def orthogonalize_w_iv(
         y = wfin[:, 1:] * xj[:, None]
         r = np.asarray(residualize(y), dtype=float)
         wx[:, 1:] = r * xjs[:, None]
+        validate_conditional_denominator(y, wx[:, 1:])
 
     if not np.isfinite(wx).all():
         raise ValueError("Conditional IV projection produced non-finite W values.")
@@ -350,6 +401,8 @@ def orthogonalize_w_cluster_iv(
             ]
         )
 
+        validate_conditional_denominator(y, wx[:, 1:])
+
     if not np.isfinite(wx).all():
         raise ValueError(
             "Clustered conditional IV projection produced non-finite W values."
@@ -358,7 +411,7 @@ def orthogonalize_w_cluster_iv(
     return wx
 
 
-def _encode_fixef_id(fixef_id: ArrayLike, n: int) -> np.ndarray:
+def encode_fixef_id(fixef_id: ArrayLike, n: int) -> np.ndarray:
     """Validate and factorize 1D or multi-way fixed-effect identifiers."""
     if isinstance(fixef_id, (str, bytes)):
         raise ValueError(
@@ -370,7 +423,7 @@ def _encode_fixef_id(fixef_id: ArrayLike, n: int) -> np.ndarray:
         if len(fixef_id) == 0:
             raise ValueError("`fixef_id` must contain at least one grouping vector.")
         for col_val in fixef_id.values():
-            col_arr = np.asarray(col_val)
+            col_arr = np.asarray(col_val, dtype=object)
             if col_arr.ndim != 1 or col_arr.shape[0] != n:
                 raise ValueError(
                     "`fixef_id` grouping vectors must be 1D and match `w` rows."
@@ -384,7 +437,7 @@ def _encode_fixef_id(fixef_id: ArrayLike, n: int) -> np.ndarray:
         for idx in range(fixef_id.shape[1]):
             raw_cols.append(fixef_id.iloc[:, idx].to_numpy())
     else:
-        fe_arr = np.asarray(fixef_id)
+        fe_arr = np.asarray(fixef_id, dtype=object)
         if fe_arr.ndim not in (1, 2):
             raise ValueError("`fixef_id` must be 1D or 2D.")
         if fe_arr.shape[0] != n:
@@ -419,68 +472,45 @@ def _encode_fixef_id(fixef_id: ArrayLike, n: int) -> np.ndarray:
     return np.column_stack(encoded_cols)
 
 
-def _project_fixef_factor(
-    mat: np.ndarray, codes: np.ndarray, n_groups: int, counts: np.ndarray
-) -> None:
-    """Subtract group means for one fixed-effect factor in place."""
-    sums = np.zeros((n_groups, mat.shape[1]), dtype=float)
-    np.add.at(sums, codes, mat)
-    mat -= (sums / counts[:, None])[codes, :]
+def make_fixef_demeaner(fixef_id: ArrayLike, n: int):
+    """Build a scale-aware unweighted demeaning callable using PyFixest."""
+    from pyfixest.core.demean import demean_within
 
+    fe_codes = encode_fixef_id(fixef_id, n)
+    first_codes = fe_codes[:, 0]
+    first_rows = np.full(int(first_codes.max()) + 1, n, dtype=int)
+    np.minimum.at(first_rows, first_codes, np.arange(n))
+    anchors = first_rows[first_codes]
+    weights = np.ones(n)
+    groups = fe_codes.astype(np.uintp, copy=False)
 
-def _demean_by_fixef(values: np.ndarray, fe_codes: np.ndarray) -> np.ndarray:
-    """Demean columns of `values` within one-way or multi-way fixed effects."""
-    if values.shape[1] == 0:
-        return values.copy()
+    def demean(values: MatrixLike, *, context: str) -> np.ndarray:
+        matrix, vector = coerce_numeric_matrix(values, context)
+        if matrix.shape[0] != n:
+            raise ValueError(f"{context} does not line up with the fixed effects.")
+        if matrix.shape[1] == 0:
+            return matrix.copy()
 
-    factors: list[tuple[np.ndarray, int, np.ndarray]] = []
-    for col in range(fe_codes.shape[1]):
-        codes = fe_codes[:, col]
-        n_groups = int(codes.max()) + 1
-        counts = np.bincount(codes, minlength=n_groups).astype(float)
-        factors.append((codes, n_groups, counts))
+        # A first-group shift lies in the absorbed space. Remove it before
+        # scaling so a large FE offset does not determine solver precision.
+        shifted = matrix - matrix[anchors]
+        scales = np.max(np.abs(shifted), axis=0)
+        scales[scales == 0] = 1.0
+        out, converged = demean_within(
+            x=shifted / scales,
+            flist=groups,
+            weights=weights,
+            tol=1e-14,
+            maxiter=10_000,
+        )
+        if not converged or not np.isfinite(out).all():
+            raise ValueError(f"{context} fixed-effect demeaning did not converge.")
+        # Do not rescale residual roundoff into a new identifying direction.
+        zero = np.max(np.abs(out), axis=0) <= 64 * np.finfo(float).eps
+        out[:, zero] = 0.0
+        return restore_residualizer_shape(out * scales, vector)
 
-    out = values.astype(float, copy=True)
-    if len(factors) == 1:
-        codes, n_groups, counts = factors[0]
-        _project_fixef_factor(out, codes, n_groups, counts)
-        return out
-
-    def _sweep(mat: np.ndarray) -> np.ndarray:
-        res = mat.copy()
-        for codes, n_groups, counts in factors:
-            _project_fixef_factor(res, codes, n_groups, counts)
-        for codes, n_groups, counts in reversed(factors[:-1]):
-            _project_fixef_factor(res, codes, n_groups, counts)
-        return res
-
-    col_scale = np.max(np.abs(out), axis=0)
-    col_scale[col_scale == 0.0] = 1.0
-    tol = 1e-12
-    max_iter = 2000
-
-    for _ in range(max_iter):
-        x1 = _sweep(out)
-        dx1 = x1 - out
-        if float(np.max(np.abs(dx1) / col_scale[None, :])) <= tol:
-            return x1
-
-        x2 = _sweep(x1)
-        dx2 = x2 - x1
-        if float(np.max(np.abs(dx2) / col_scale[None, :])) <= tol:
-            return x2
-
-        ddx = dx2 - dx1
-        denom = np.sum(ddx * ddx, axis=0)
-        numer = np.sum(dx2 * ddx, axis=0)
-        out = x2
-        active = denom > (1e-30 * (col_scale**2))
-        if np.any(active):
-            step = np.zeros_like(denom)
-            step[active] = numer[active] / denom[active]
-            out[:, active] -= dx2[:, active] * step[None, active]
-
-    raise ValueError("Fixed-effect demeaning did not converge.")
+    return demean
 
 
 def orthogonalize_w(
@@ -504,7 +534,10 @@ def orthogonalize_w(
         model_mat: Regression design matrix used for orthogonalization.
         include_intercept: Whether an intercept should be included when
             `fixef_id` is `None`.
-        fixef_id: Optional fixed-effect identifiers for demeaning.
+        fixef_id: Optional group IDs aligned positionally with `w`. Supply one
+            vector, a matrix or DataFrame with one column per effect, or a
+            mapping to group vectors. Pass only within-identifiable regressors
+            in `model_mat` when absorbing fixed effects.
 
     Returns:
         The orthogonalized projection matrix for conditional inference.
@@ -523,7 +556,7 @@ def orthogonalize_w(
     if xjs.ndim != 1 or xjs.shape[0] != n or not np.isfinite(xjs).all():
         raise ValueError("`xjs` must be a finite 1D vector matching `w` rows.")
 
-    fe_codes = None if fixef_id is None else _encode_fixef_id(fixef_id, n)
+    demean = None if fixef_id is None else make_fixef_demeaner(fixef_id, n)
 
     wx = w.copy()
     wx[:, 0] = wx[:, 0] * xj * xjs
@@ -539,45 +572,18 @@ def orthogonalize_w(
             raise ValueError("`model_mat` must be a 2D matrix matching `w` rows.")
         if not np.isfinite(x).all():
             raise ValueError("`model_mat` contains non-finite values.")
-        if include_intercept and fe_codes is None and not has_intercept_col:
+        if include_intercept and demean is None and not has_intercept_col:
             x = np.column_stack((np.ones(n), x))
 
         rx = wx[:, 1:] * xj[:, None]
 
         # Conditional OLS denominator weights are S_x M_V D_x B_q.
-        pre_max = float(np.max(np.linalg.norm(rx, axis=0))) if rx.size > 0 else 0.0
-        if not math.isfinite(pre_max) or pre_max == 0.0:
-            raise ValueError(
-                "Conditional projection collapsed all non-constant W columns."
-            )
-
-        if fe_codes is not None:
-            # Apply Frisch-Waugh-Lovell fixed-effect demeaning to both X and Rx.
-            pre_x_norms = np.linalg.norm(x, axis=0)
-            x = _demean_by_fixef(x, fe_codes)
-            rx = _demean_by_fixef(rx, fe_codes)
-            if x.shape[1] > 0:
-                post_x_norms = np.linalg.norm(x, axis=0)
-                if bool(
-                    np.any(
-                        (pre_x_norms == 0.0)
-                        | (post_x_norms <= 1e-10 * pre_x_norms)
-                    )
-                ):
-                    raise ValueError("OLS residualizer is rank deficient.")
-                x_scaled = x / post_x_norms[None, :]
-                if int(np.linalg.matrix_rank(x_scaled, tol=1e-10)) < x.shape[1]:
-                    raise ValueError("OLS residualizer is rank deficient.")
-
-        rr = rx - x @ np.linalg.lstsq(x, rx, rcond=None)[0]
+        residualize = make_ols_residualizer(
+            x, demean=demean, require_full_rank=demean is not None
+        )
+        rr = residualize(rx)
         wx[:, 1:] = rr * xjs[:, None]
-        post_norms = np.linalg.norm(wx[:, 1:], axis=0)
-        if not np.isfinite(post_norms).all() or bool(
-            np.all(post_norms <= 1e-12 * pre_max)
-        ):
-            raise ValueError(
-                "Conditional projection collapsed all non-constant W columns."
-            )
+        validate_conditional_denominator(rx, wx[:, 1:])
 
     return wx
 
@@ -632,21 +638,7 @@ def orthogonalize_w_cluster(
 
     if ncol_w > 1:
         # Conditional clustered OLS denominator weights are Xi_s' M_V Xi B_q.
-        pre_max = float(
-            np.max(
-                np.sqrt(
-                    np.sum(
-                        (w_indiv[:, 1:] * xj_indiv[:, None]) ** 2,
-                        axis=0,
-                    )
-                )
-            )
-        )
-        if not math.isfinite(pre_max) or pre_max == 0.0:
-            raise ValueError(
-                "Conditional projection collapsed all non-constant W columns."
-            )
-
+        weighted = w_indiv[:, 1:] * xj_indiv[:, None]
         x = np.asarray(model_mat_indiv, dtype=float)
         has_intercept_col = (
             hasattr(model_mat_indiv, "columns")
@@ -655,21 +647,15 @@ def orthogonalize_w_cluster(
         if include_intercept and not has_intercept_col:
             x = np.column_stack((np.ones(x.shape[0]), x))
 
-        for col in range(1, ncol_w):
-            temp = w_indiv[:, col] * xj_indiv
-            resid_col = temp - x @ np.linalg.lstsq(x, temp, rcond=None)[0]
-            wx[:, col] = np.bincount(
+        residualize = make_ols_residualizer(x)
+        residual = residualize(weighted)
+        for col in range(ncol_w - 1):
+            wx[:, col + 1] = np.bincount(
                 cl_idx,
-                weights=resid_col * xjs_indiv,
+                weights=residual[:, col] * xjs_indiv,
                 minlength=nclust,
             )
 
-        post_norms = np.linalg.norm(wx[:, 1:], axis=0)
-        if not np.isfinite(post_norms).all() or bool(
-            np.all(post_norms <= 1e-12 * pre_max)
-        ):
-            raise ValueError(
-                "Conditional projection collapsed all non-constant W columns."
-            )
+        validate_conditional_denominator(weighted, wx[:, 1:])
 
     return wx

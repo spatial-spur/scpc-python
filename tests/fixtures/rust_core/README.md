@@ -1,0 +1,1 @@
+These verification fixtures are kept here so native and fallback parity tests run from an independent checkout. The benchmark CSVs were copied from the shared verification workspace under `verification/data`. The frozen Milestone 1 numerical baselines were copied from `spatial-rust/fixtures/m1_exact_scpc.json`. Each test documents how the historical values are used.

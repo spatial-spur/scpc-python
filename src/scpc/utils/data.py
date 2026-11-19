@@ -1,7 +1,9 @@
 from __future__ import annotations
-from collections.abc import Sequence
+
+from collections.abc import Callable, Sequence
+from functools import cache
+
 import numpy as np
-import pandas as pd
 
 from ..types import (
     ArrayLike,
@@ -12,7 +14,7 @@ from ..types import (
     MatrixLike,
     ModelLike,
 )
-from .matrix import make_iv_residualizer
+from .matrix import make_fixef_demeaner, make_iv_residualizer, make_ols_residualizer
 
 
 def is_pyfixest_model(model: ModelLike) -> bool:
@@ -77,62 +79,9 @@ def get_pyfixest_named_columns(
 
 
 def make_pyfixest_demeaner(model: ModelLike):
-    """Build the fixed-effect demeaning callable used by pyfixest.
-
-    This mirrors the `fixest::demean(...)` calls in scpcr. pyfixest keeps the
-    fixed-effect structure outside the numeric design matrices, so we rebuild
-    the same demeaning step from the stored model metadata when conditional
-    scpc needs it.
-    """
-    from pyfixest.estimation.internals.demean_ import demean_model
-
+    """Build the unweighted conditional projector for the fitted FE sample."""
     fe = model._fe
-    weights = model._weights
-    na_index = model._na_index
-    fixef_tol = model._fixef_tol
-    fixef_maxiter = model._fixef_maxiter
-    demean_func = model._demean_func
-
-    def demean(values: MatrixLike, *, context: str) -> np.ndarray:
-        values = np.asarray(values, dtype=float)
-        vec_input = values.ndim == 1
-        if vec_input:
-            values = values[:, None]
-        if values.ndim != 2:
-            raise ValueError(f"{context} must be a vector or matrix.")
-        if values.shape[0] != len(fe):
-            raise ValueError(
-                f"{context} does not line up with the stored fixed effects."
-            )
-        if values.shape[1] == 0:
-            return values[:, 0] if vec_input else values
-
-        col_names = [f"v{i}" for i in range(values.shape[1])]
-        frame = pd.DataFrame(values, columns=col_names, index=fe.index)
-        y = frame.iloc[:, :1]
-        x = frame.iloc[:, 1:]
-        # pyfixest caches demeaned values by column name. we pass a fresh
-        # cache here because scpc demeaning is for temporary arrays whose
-        # names do not identify their contents across calls.
-        y_demeaned, x_demeaned = demean_model(
-            y,
-            x,
-            fe,
-            weights,
-            {},
-            na_index,
-            fixef_tol,
-            fixef_maxiter,
-            demean_func,
-        )
-
-        out = pd.concat([y_demeaned, x_demeaned], axis=1).loc[:, col_names]
-        out_values = np.asarray(out, dtype=float)
-        if out_values.shape != values.shape:
-            raise ValueError(f"{context} changed shape during fixed-effect demeaning.")
-        return out_values[:, 0] if vec_input else out_values
-
-    return demean
+    return make_fixef_demeaner(fe, len(fe))
 
 
 def is_fixest_iv_second_stage(model: ModelLike) -> bool:
@@ -192,7 +141,18 @@ def get_obs_index(model: ModelLike, data: DataFrameLike) -> ArrayLike:
         # one-based convention used by the r helpers.
         return obs_index.astype(int, copy=False) + 1
 
-    row_labels = np.asarray(model.model.data.row_labels)
+    model_data = model.model.data
+    row_labels = model_data.row_labels
+    if row_labels is None:
+        positions = np.arange(len(data))
+        removed = getattr(model_data, "missing_row_idx", [])
+        if len(removed):
+            if max(removed) >= len(data):
+                raise ValueError("Could not align the model rows with `data`.")
+            positions = np.delete(positions, removed)
+        if len(positions) != int(model.nobs):
+            raise ValueError("Could not align the model rows with `data`.")
+        return positions + 1
 
     if not data.index.is_unique:
         raise ValueError(
@@ -437,6 +397,7 @@ def get_conditional_projection_setup(
     model_mat: MatrixLike,
     n: int,
     uncond: bool,
+    iv_design: FixestSpec | None = None,
 ) -> ConditionalProjectionSetup:
     """Prepare the regression-side objects for conditional SCPC.
 
@@ -450,6 +411,7 @@ def get_conditional_projection_setup(
         model_mat: Raw model matrix extracted from the model.
         n: Expected number of active observations.
         uncond: Whether unconditional inference was requested.
+        iv_design: Previously extracted IV design, if available.
 
     Returns:
         The normalized conditional projection setup.
@@ -475,7 +437,7 @@ def get_conditional_projection_setup(
             )
 
         if is_fixest_iv_second_stage(model):
-            design = get_fixest_iv_design(model)
+            design = get_fixest_iv_design(model) if iv_design is None else iv_design
             model_mat_iv = np.asarray(design["model_mat"], dtype=float)
             x_iv = np.asarray(design["X"], dtype=float)
             z_iv = np.asarray(design["Z"], dtype=float)
@@ -497,8 +459,10 @@ def get_conditional_projection_setup(
                 fixef_id=np.asarray(getattr(model, "_fe"))
                 if demean is not None
                 else None,
-                residualize=make_iv_residualizer(
-                    x_iv, z_iv, demean=demean, transpose=True
+                residualize=defer_residualizer(
+                    lambda: make_iv_residualizer(
+                        x_iv, z_iv, demean=demean, transpose=True
+                    )
                 ),
                 is_iv=True,
             )
@@ -506,20 +470,15 @@ def get_conditional_projection_setup(
         if has_fixest_fe(model):
             demean = make_pyfixest_demeaner(model)
 
-            def residualize_fe(values: MatrixLike) -> np.ndarray:
-                centered = np.asarray(
-                    demean(values, context="conditional FE projection"), dtype=float
-                )
-                return (
-                    centered
-                    - model_mat @ np.linalg.lstsq(model_mat, centered, rcond=None)[0]
-                )
-
             return ConditionalProjectionSetup(
                 model_mat=model_mat,
                 include_intercept=False,
                 fixef_id=np.asarray(getattr(model, "_fe")),
-                residualize=residualize_fe,
+                residualize=defer_residualizer(
+                    lambda: make_ols_residualizer(
+                        model_mat, demean=demean, require_full_rank=True
+                    )
+                ),
             )
 
         return setup
@@ -530,6 +489,18 @@ def get_conditional_projection_setup(
     raise ValueError(
         "Conditional setup for fixest-style fixed effects is not implemented."
     )
+
+
+def defer_residualizer(
+    build: Callable[[], Callable[[MatrixLike], np.ndarray]],
+) -> Callable[[MatrixLike], np.ndarray]:
+    """Build the fallback projection only if it is used, once per fit."""
+    cached_build = cache(build)
+
+    def residualize(values: MatrixLike) -> np.ndarray:
+        return cached_build()(values)
+
+    return residualize
 
 
 def resolve_coords_input(

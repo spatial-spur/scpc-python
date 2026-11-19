@@ -7,11 +7,37 @@ import statsmodels.formula.api as smf
 import pyfixest as pf
 
 from scpc import scpc
+from scpc.core import load_rust_backend
 from scpc.utils.matrix import (
     make_iv_residualizer,
     orthogonalize_w_iv,
     orthogonalize_w_cluster_iv,
 )
+
+
+RUST_AVAILABLE = load_rust_backend() is not None
+RUST_PARAMETER = pytest.param(
+    "rust",
+    marks=pytest.mark.skipif(
+        not RUST_AVAILABLE, reason="compatible native extension unavailable"
+    ),
+)
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_unconditional_scpc_skips_conditional_design(monkeypatch, backend):
+    rng = np.random.default_rng(182)
+    df = pd.DataFrame(rng.normal(size=(30, 4)), columns=["y", "x", "s1", "s2"])
+    model = smf.ols("y ~ x", data=df).fit()
+
+    def unexpected_design(*args, **kwargs):
+        raise AssertionError(
+            "Unconditional SCPC tried to construct a conditional design"
+        )
+
+    monkeypatch.setattr("scpc.core.get_conditional_projection_setup", unexpected_design)
+    out = scpc(model, df, coords_euclidean=["s1", "s2"], uncond=True, backend=backend)
+    assert np.isfinite(out.scpcstats).all()
 
 
 def test_oblique_weights_match_direct_matrix():
@@ -46,7 +72,7 @@ def test_oblique_weights_match_direct_matrix():
     )
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_identity_iv_matches_ols(backend):
     s = np.array([0.0, 1.0, 2.0, 4.0, 6.0])
     x = np.array([-1.0, -4.0, 2.0, 2.0, 1.0])
@@ -62,7 +88,7 @@ def test_identity_iv_matches_ols(backend):
     assert iv.scpccvs[1, 2] == pytest.approx(17.62678224, abs=1e-6)
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 @pytest.mark.parametrize("cluster", [None, "cl"])
 def test_absorbed_fe_matches_dummies(backend, cluster):
     rng = np.random.default_rng(167)
@@ -102,11 +128,12 @@ def test_multiway_absorbed_fe_routes_to_fallback():
     np.testing.assert_allclose(auto.scpcstats[0], dummy.scpcstats[-1], atol=2e-6)
     assert auto.scpccvs is not None and dummy.scpccvs is not None
     np.testing.assert_allclose(auto.scpccvs[0], dummy.scpccvs[-1], atol=2e-6)
-    with pytest.raises(NotImplementedError, match="multi-way"):
-        scpc(fit, d, backend="rust", **kw)
+    if RUST_AVAILABLE:
+        with pytest.raises(NotImplementedError, match="multi-way"):
+            scpc(fit, d, backend="rust", **kw)
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 @pytest.mark.parametrize("cluster", [None, "cl"])
 def test_identity_iv_with_fixed_effects_matches_ols(backend, cluster):
     rng = np.random.default_rng(120)

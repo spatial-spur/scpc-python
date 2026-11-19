@@ -22,6 +22,35 @@ GQX = GQX * 0.5 + 0.5
 GQW = GQW * 0.5
 
 
+class InvalidSampledCovarianceError(ValueError):
+    """An approximate covariance grid cannot define SCPC inference."""
+
+
+def validate_sampled_covariance(omega: np.ndarray, grid_index: int) -> None:
+    """Reject materially indefinite sampled matrices, including zero-diagonal cases."""
+    message = (
+        f"Invalid sampled SCPC covariance at grid point {grid_index + 1}: "
+        "expected a finite positive-semidefinite matrix. Try method='exact'."
+    )
+    if (
+        omega.ndim != 2
+        or not omega.size
+        or omega.shape[0] != omega.shape[1]
+        or not np.isfinite(omega).all()
+    ):
+        raise InvalidSampledCovarianceError(message)
+    scale = float(np.max(np.abs(omega)))
+    if scale == 0.0:
+        return
+    tolerance = 32 * omega.shape[0] * np.finfo(float).eps
+    scaled = omega / scale
+    if (
+        np.max(np.abs(scaled - scaled.T)) > tolerance
+        or np.linalg.eigvalsh(scaled)[0] < -tolerance
+    ):
+        raise InvalidSampledCovarianceError(message)
+
+
 def get_avc(c: float, dist: ArrayLike) -> float:
     """Evaluate average pairwise correlation under an exponential kernel.
 
@@ -293,9 +322,11 @@ def lnget_oms(
     c = c0
     for i in range(nc):
         cd = np.exp(-c * dist)
-        oms[i] = gram + 0.5 * (n * (n - 1) / capM) * (
+        omega = gram + 0.5 * (n * (n - 1) / capM) * (
             w1.T @ (w2 * cd[:, None]) + w2.T @ (w1 * cd[:, None])
         )
+        validate_sampled_covariance(omega, i)
+        oms[i] = omega
         c = c * cgridfac
 
     return oms, random_t

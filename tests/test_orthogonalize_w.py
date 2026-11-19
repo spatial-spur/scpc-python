@@ -7,7 +7,11 @@ import numpy.testing as npt
 import pandas as pd
 import pytest
 
-from scpc.utils.matrix import orthogonalize_w
+from scpc.utils.matrix import (
+    make_fixef_demeaner,
+    make_ols_residualizer,
+    orthogonalize_w,
+)
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
 
@@ -16,6 +20,18 @@ def _dummy_matrix(groups: np.ndarray, *, drop_first: bool = False) -> np.ndarray
     levels = np.unique(groups)
     dummies = np.equal.outer(groups, levels).astype(float)
     return dummies[:, 1:] if drop_first else dummies
+
+
+def test_absorbed_ols_preserves_representable_variation_near_large_anchor() -> None:
+    fe = np.repeat([0, 1, 2], 3)
+    x = np.array([0, 1, 2, 0, 2, 1, 1, 0, 2], dtype=float)[:, None]
+    demean = make_fixef_demeaner(fe, len(fe))
+    values = np.arange(9.0) ** 2
+    expected = make_ols_residualizer(x, demean=demean, require_full_rank=True)(values)
+    actual = make_ols_residualizer(x + 2.0**52, demean=demean, require_full_rank=True)(
+        values
+    )
+    npt.assert_allclose(actual, expected, rtol=0, atol=1e-12)
 
 
 def test_orthogonalize_w_leaves_an_already_orthogonal_basis_unchanged() -> None:
@@ -79,9 +95,7 @@ def test_orthogonalize_w_two_way_fixef_matches_explicit_dummies() -> None:
     xjs = np.sign(xj)
     model_mat = rng.normal(size=(n, 2)) + 0.3 * fe1[:, None] - 0.2 * fe2[:, None]
 
-    dummies = np.column_stack(
-        (_dummy_matrix(fe1), _dummy_matrix(fe2, drop_first=True))
-    )
+    dummies = np.column_stack((_dummy_matrix(fe1), _dummy_matrix(fe2, drop_first=True)))
     expected = orthogonalize_w(
         w,
         xj,
@@ -324,3 +338,20 @@ def test_python_r_parity_orthogonalize_w_two_way_fixef() -> None:
     )
 
     npt.assert_allclose(py_value, np.array(r_value), atol=ATOL, rtol=RTOL)
+
+
+def test_orthogonalize_w_multiway_absorption_detects_collapse() -> None:
+    groups = np.arange(75)
+    g1 = np.repeat(groups, 4)
+    g2 = np.repeat(np.column_stack((groups, groups + 1)).ravel(), 2)
+    n = len(g1)
+    values = np.random.default_rng(95).normal(size=len(groups) + 1)[g2]
+    w = np.column_stack((np.ones(n), values))
+    with pytest.raises(ValueError, match="collapsed"):
+        orthogonalize_w(
+            w,
+            np.ones(n),
+            np.ones(n),
+            np.empty((n, 0)),
+            fixef_id=[list(row) for row in zip(g1, g2)],
+        )
