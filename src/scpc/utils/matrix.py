@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import math
 
 import numpy as np
+import pandas as pd
 from scipy.sparse.linalg import ArpackError, eigsh
 
 from ..types import ArrayLike, MatrixLike
@@ -356,6 +358,131 @@ def orthogonalize_w_cluster_iv(
     return wx
 
 
+def _encode_fixef_id(fixef_id: ArrayLike, n: int) -> np.ndarray:
+    """Validate and factorize 1D or multi-way fixed-effect identifiers."""
+    if isinstance(fixef_id, (str, bytes)):
+        raise ValueError(
+            "`fixef_id` must be a 1D or 2D array-like of fixed-effect identifiers."
+        )
+
+    raw_cols: list[np.ndarray] = []
+    if isinstance(fixef_id, Mapping):
+        if len(fixef_id) == 0:
+            raise ValueError("`fixef_id` must contain at least one grouping vector.")
+        for col_val in fixef_id.values():
+            col_arr = np.asarray(col_val)
+            if col_arr.ndim != 1 or col_arr.shape[0] != n:
+                raise ValueError(
+                    "`fixef_id` grouping vectors must be 1D and match `w` rows."
+                )
+            raw_cols.append(col_arr)
+    elif isinstance(fixef_id, pd.DataFrame):
+        if fixef_id.shape[0] != n:
+            raise ValueError("`fixef_id` row count does not match `w`.")
+        if fixef_id.shape[1] < 1:
+            raise ValueError("`fixef_id` must contain at least one grouping column.")
+        for idx in range(fixef_id.shape[1]):
+            raw_cols.append(fixef_id.iloc[:, idx].to_numpy())
+    else:
+        fe_arr = np.asarray(fixef_id)
+        if fe_arr.ndim not in (1, 2):
+            raise ValueError("`fixef_id` must be 1D or 2D.")
+        if fe_arr.shape[0] != n:
+            raise ValueError("`fixef_id` row count does not match `w`.")
+        if fe_arr.ndim == 1:
+            raw_cols.append(fe_arr)
+        else:
+            if fe_arr.shape[1] < 1:
+                raise ValueError(
+                    "`fixef_id` must contain at least one grouping column."
+                )
+            for idx in range(fe_arr.shape[1]):
+                raw_cols.append(fe_arr[:, idx])
+
+    encoded_cols: list[np.ndarray] = []
+    for col_arr in raw_cols:
+        if bool(np.any(pd.isna(col_arr))):
+            raise ValueError("`fixef_id` contains missing or NaN values.")
+        if np.issubdtype(col_arr.dtype, np.floating) and not np.isfinite(col_arr).all():
+            raise ValueError("`fixef_id` contains non-finite values.")
+        if col_arr.dtype == object:
+            for item in col_arr:
+                if isinstance(item, (float, np.floating)) and not math.isfinite(
+                    float(item)
+                ):
+                    raise ValueError("`fixef_id` contains non-finite values.")
+        codes, _ = pd.factorize(col_arr, sort=False)
+        if bool(np.any(codes < 0)):
+            raise ValueError("`fixef_id` contains missing or NaN values.")
+        encoded_cols.append(codes.astype(np.int64, copy=False))
+
+    return np.column_stack(encoded_cols)
+
+
+def _project_fixef_factor(
+    mat: np.ndarray, codes: np.ndarray, n_groups: int, counts: np.ndarray
+) -> None:
+    """Subtract group means for one fixed-effect factor in place."""
+    sums = np.zeros((n_groups, mat.shape[1]), dtype=float)
+    np.add.at(sums, codes, mat)
+    mat -= (sums / counts[:, None])[codes, :]
+
+
+def _demean_by_fixef(values: np.ndarray, fe_codes: np.ndarray) -> np.ndarray:
+    """Demean columns of `values` within one-way or multi-way fixed effects."""
+    if values.shape[1] == 0:
+        return values.copy()
+
+    factors: list[tuple[np.ndarray, int, np.ndarray]] = []
+    for col in range(fe_codes.shape[1]):
+        codes = fe_codes[:, col]
+        n_groups = int(codes.max()) + 1
+        counts = np.bincount(codes, minlength=n_groups).astype(float)
+        factors.append((codes, n_groups, counts))
+
+    out = values.astype(float, copy=True)
+    if len(factors) == 1:
+        codes, n_groups, counts = factors[0]
+        _project_fixef_factor(out, codes, n_groups, counts)
+        return out
+
+    def _sweep(mat: np.ndarray) -> np.ndarray:
+        res = mat.copy()
+        for codes, n_groups, counts in factors:
+            _project_fixef_factor(res, codes, n_groups, counts)
+        for codes, n_groups, counts in reversed(factors[:-1]):
+            _project_fixef_factor(res, codes, n_groups, counts)
+        return res
+
+    col_scale = np.max(np.abs(out), axis=0)
+    col_scale[col_scale == 0.0] = 1.0
+    tol = 1e-12
+    max_iter = 2000
+
+    for _ in range(max_iter):
+        x1 = _sweep(out)
+        dx1 = x1 - out
+        if float(np.max(np.abs(dx1) / col_scale[None, :])) <= tol:
+            return x1
+
+        x2 = _sweep(x1)
+        dx2 = x2 - x1
+        if float(np.max(np.abs(dx2) / col_scale[None, :])) <= tol:
+            return x2
+
+        ddx = dx2 - dx1
+        denom = np.sum(ddx * ddx, axis=0)
+        numer = np.sum(dx2 * ddx, axis=0)
+        out = x2
+        active = denom > (1e-30 * (col_scale**2))
+        if np.any(active):
+            step = np.zeros_like(denom)
+            step[active] = numer[active] / denom[active]
+            out[:, active] -= dx2[:, active] * step[None, active]
+
+    raise ValueError("Fixed-effect demeaning did not converge.")
+
+
 def orthogonalize_w(
     w: MatrixLike,
     xj: ArrayLike,
@@ -375,30 +502,47 @@ def orthogonalize_w(
         xj: Coefficient-specific influence direction.
         xjs: Normalized sign or scaling vector for `xj`.
         model_mat: Regression design matrix used for orthogonalization.
-        include_intercept: Whether an intercept should be included.
+        include_intercept: Whether an intercept should be included when
+            `fixef_id` is `None`.
         fixef_id: Optional fixed-effect identifiers for demeaning.
 
     Returns:
         The orthogonalized projection matrix for conditional inference.
     """
     w = np.asarray(w, dtype=float)
+    if w.ndim != 2 or w.shape[0] < 1 or w.shape[1] < 1:
+        raise ValueError("`w` must be a non-empty 2D matrix.")
+    if not np.isfinite(w).all():
+        raise ValueError("`w` contains non-finite values.")
+    n = w.shape[0]
+
     xj = np.asarray(xj, dtype=float)
     xjs = np.asarray(xjs, dtype=float)
+    if xj.ndim != 1 or xj.shape[0] != n or not np.isfinite(xj).all():
+        raise ValueError("`xj` must be a finite 1D vector matching `w` rows.")
+    if xjs.ndim != 1 or xjs.shape[0] != n or not np.isfinite(xjs).all():
+        raise ValueError("`xjs` must be a finite 1D vector matching `w` rows.")
+
+    fe_codes = None if fixef_id is None else _encode_fixef_id(fixef_id, n)
 
     wx = w.copy()
     wx[:, 0] = wx[:, 0] * xj * xjs
 
     if wx.shape[1] > 1:
-        x = np.asarray(model_mat, dtype=float)
         has_intercept_col = (
             hasattr(model_mat, "columns") and "(Intercept)" in model_mat.columns
         )
-        if include_intercept and not has_intercept_col:
-            x = np.column_stack((np.ones(x.shape[0]), x))
+        x = np.asarray(model_mat, dtype=float)
+        if x.ndim == 1:
+            x = x[:, None]
+        if x.ndim != 2 or x.shape[0] != n:
+            raise ValueError("`model_mat` must be a 2D matrix matching `w` rows.")
+        if not np.isfinite(x).all():
+            raise ValueError("`model_mat` contains non-finite values.")
+        if include_intercept and fe_codes is None and not has_intercept_col:
+            x = np.column_stack((np.ones(n), x))
 
         rx = wx[:, 1:] * xj[:, None]
-        if fixef_id is not None:
-            raise ValueError("Fixed-effect demeaning is not implemented.")
 
         # Conditional OLS denominator weights are S_x M_V D_x B_q.
         pre_max = float(np.max(np.linalg.norm(rx, axis=0))) if rx.size > 0 else 0.0
@@ -406,6 +550,25 @@ def orthogonalize_w(
             raise ValueError(
                 "Conditional projection collapsed all non-constant W columns."
             )
+
+        if fe_codes is not None:
+            # Apply Frisch-Waugh-Lovell fixed-effect demeaning to both X and Rx.
+            pre_x_norms = np.linalg.norm(x, axis=0)
+            x = _demean_by_fixef(x, fe_codes)
+            rx = _demean_by_fixef(rx, fe_codes)
+            if x.shape[1] > 0:
+                post_x_norms = np.linalg.norm(x, axis=0)
+                if bool(
+                    np.any(
+                        (pre_x_norms == 0.0)
+                        | (post_x_norms <= 1e-10 * pre_x_norms)
+                    )
+                ):
+                    raise ValueError("OLS residualizer is rank deficient.")
+                x_scaled = x / post_x_norms[None, :]
+                if int(np.linalg.matrix_rank(x_scaled, tol=1e-10)) < x.shape[1]:
+                    raise ValueError("OLS residualizer is rank deficient.")
+
         rr = rx - x @ np.linalg.lstsq(x, rx, rcond=None)[0]
         wx[:, 1:] = rr * xjs[:, None]
         post_norms = np.linalg.norm(wx[:, 1:], axis=0)

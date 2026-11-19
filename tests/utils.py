@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -256,6 +257,21 @@ def run_r_script(
             script_path.unlink(missing_ok=True)
 
 
+def _parse_r_version(version_str: str) -> tuple[int, ...]:
+    """Parse an R package version string into an integer comparison tuple."""
+    return tuple(int(part) for part in re.split(r"[.-]", version_str.strip()))
+
+
+def _r_description_version(desc_path: Path) -> str | None:
+    """Read the Version field from an installed R package DESCRIPTION file."""
+    if not desc_path.exists():
+        return None
+    for line in desc_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("Version:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
 def ensure_scpc_r_installed() -> None:
     """Install the reference scpcR package into the repo-local pytest cache."""
     assert R is not None, "Rscript not found."
@@ -265,10 +281,36 @@ def ensure_scpc_r_installed() -> None:
         SCPC_R_LIBRARY / "fixest" / "DESCRIPTION",
         SCPC_R_LIBRARY / "sandwich" / "DESCRIPTION",
     ]
-    if all(path.exists() for path in expected_files) and not any(
-        SCPC_R_LIBRARY.glob("00LOCK*")
-    ):
-        return
+    expected_versions = {
+        "scpcR": SCPC_R_VERSION,
+        "fixest": FIXEST_R_VERSION,
+        "sandwich": SANDWICH_R_VERSION,
+    }
+    cache_complete = (
+        all(path.exists() for path in expected_files)
+        and all(
+            _r_description_version(SCPC_R_LIBRARY / pkg / "DESCRIPTION") == ver
+            for pkg, ver in expected_versions.items()
+        )
+        and not any(SCPC_R_LIBRARY.glob("00LOCK*"))
+    )
+    if cache_complete:
+        sm_ver = _r_description_version(SCPC_R_LIBRARY / "stringmagic" / "DESCRIPTION")
+        if sm_ver is not None and _parse_r_version(sm_ver) >= (1, 2, 0):
+            return
+        check = run_r_script(
+            f"""
+            .libPaths(c({SCPC_R_LIBRARY.as_posix()!r}, .Library))
+            ok <- requireNamespace("stringmagic", quietly = TRUE) &&
+              utils::packageVersion("stringmagic") >= "1.2.0" &&
+              requireNamespace("fixest", quietly = TRUE) &&
+              requireNamespace("scpcR", quietly = TRUE) &&
+              requireNamespace("sandwich", quietly = TRUE)
+            if (!ok) quit(status = 1)
+            """
+        )
+        if check.returncode == 0:
+            return
 
     if SCPC_R_LIBRARY.exists():
         shutil.rmtree(SCPC_R_LIBRARY)
@@ -286,6 +328,13 @@ def ensure_scpc_r_installed() -> None:
         missing <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
         if (length(missing)) {{
           install.packages(missing, repos = repos, lib = .libPaths()[1], quiet = TRUE)
+        }}
+
+        if (!requireNamespace("stringmagic", quietly = TRUE) || packageVersion("stringmagic") < "1.2.0") {{
+          if ("stringmagic" %in% loadedNamespaces()) {{
+            unloadNamespace("stringmagic")
+          }}
+          install.packages("stringmagic", repos = repos, lib = .libPaths()[1], quiet = TRUE)
         }}
 
         remotes::install_url(
@@ -309,6 +358,15 @@ def ensure_scpc_r_installed() -> None:
           upgrade = "never",
           quiet = TRUE
         )
+
+        if (!requireNamespace("stringmagic", quietly = TRUE) || packageVersion("stringmagic") < "1.2.0") {{
+          stop("Failed to install stringmagic >= 1.2.0.")
+        }}
+        if (!requireNamespace("fixest", quietly = TRUE) ||
+            !requireNamespace("scpcR", quietly = TRUE) ||
+            !requireNamespace("sandwich", quietly = TRUE)) {{
+          stop("Failed to load installed scpcR reference packages.")
+        }}
         """
     )
 
