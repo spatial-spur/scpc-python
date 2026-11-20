@@ -4,6 +4,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
+from scpc.core import compute_iv_projector
 from scpc.utils.matrix import make_fixef_demeaner, make_iv_residualizer
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
@@ -83,6 +84,16 @@ def test_make_iv_residualizer_errors_on_rank_deficient_designs() -> None:
 
     with pytest.raises(ValueError, match="rank deficient"):
         make_iv_residualizer(x, z)
+
+
+@pytest.mark.parametrize("p", [1, 2])
+@pytest.mark.parametrize("projector", [compute_iv_projector, make_iv_residualizer])
+def test_iv_rejects_near_zero_projected_design(p, projector) -> None:
+    z = np.array([[1, 1], [1, -1], [1, 1], [1, -1]], dtype=float)
+    x = np.array([[1, 1], [1, -1], [-1, -1], [-1, 1]], dtype=float)
+    x += 1e-13 * z
+    with pytest.raises(ValueError, match="rank deficient"):
+        projector(x[:, :p], z[:, :p])
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")

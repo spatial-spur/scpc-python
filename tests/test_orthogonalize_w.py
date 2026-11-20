@@ -34,6 +34,62 @@ def test_absorbed_ols_preserves_representable_variation_near_large_anchor() -> N
     npt.assert_allclose(actual, expected, rtol=0, atol=1e-12)
 
 
+def test_two_way_absorption_preserves_large_offsets_in_either_effect() -> None:
+    fe = np.column_stack((np.repeat(np.arange(4), 5), np.tile(np.arange(5), 4)))
+    rng = np.random.default_rng(1143)
+    x = rng.integers(-3, 4, size=20)
+    values = rng.normal(size=(20, 2))
+    dummies = np.column_stack([_dummy_matrix(fe[:, i]) for i in range(2)])
+    residualize = make_ols_residualizer(np.column_stack((x, dummies)))
+    expected = residualize(values)
+    design = np.column_stack((x + 1e15 * fe[:, 0], x + 1e15 * fe[:, 1]))
+    for order in (fe, fe[:, ::-1]):
+        demean = make_fixef_demeaner(order, len(fe))
+        for regressor in design.T:
+            actual = make_ols_residualizer(
+                regressor, demean=demean, require_full_rank=True
+            )(values)
+            npt.assert_allclose(actual, expected, rtol=0, atol=1e-12)
+
+
+def test_two_way_absorption_refines_a_banded_panel_with_large_mixed_offsets() -> None:
+    group = np.arange(1, 81)
+    fe = np.column_stack(
+        (np.r_[group, group[:-1], group], np.r_[group, group[1:], group])
+    )
+    contrast = np.resize([1, 2], len(group))
+    x = np.r_[contrast, np.zeros(len(group) - 1), -contrast]
+    dummies = np.column_stack([_dummy_matrix(fe[:, i]) for i in range(2)])
+    y = np.sin(np.arange(len(fe)))
+    expected = make_ols_residualizer(np.column_stack((x, dummies)))(y)
+    x += 2.0**42 * fe.sum(axis=1)
+    for order in (fe, fe[:, ::-1]):
+        demean = make_fixef_demeaner(order, len(fe))
+        actual = make_ols_residualizer(x, demean=demean, require_full_rank=True)(y)
+        npt.assert_allclose(actual, expected, rtol=0, atol=1e-9)
+        with pytest.raises(ValueError, match="rank deficient"):
+            make_ols_residualizer(
+                fe[:, 0] + 0.75 * fe[:, 1], demean=demean, require_full_rank=True
+            )
+
+
+def test_one_way_absorption_rejects_sub_ulp_leakage_as_a_design_direction() -> None:
+    fe = np.repeat([1.0, 2.0, 3.0], 4)
+    y = np.tile([0.4, -0.75, 0.8, 1.25], 3)
+    rounded = (fe + y) - y
+    assert not np.array_equal(rounded, fe)
+    demean = make_fixef_demeaner(fe, len(fe))
+    with pytest.raises(ValueError, match="rank deficient"):
+        make_ols_residualizer(rounded, demean=demean, require_full_rank=True)
+
+
+def test_ols_residualizer_accepts_an_integer_design() -> None:
+    x = np.array([[1, 0], [1, 1], [1, 2]])
+    y = np.array([1, 0, 1])
+    actual = make_ols_residualizer(x)(y)
+    npt.assert_allclose(actual, [1 / 3, -2 / 3, 1 / 3], rtol=0, atol=1e-12)
+
+
 def test_orthogonalize_w_leaves_an_already_orthogonal_basis_unchanged() -> None:
     w = np.array(
         [

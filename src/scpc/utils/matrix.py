@@ -167,6 +167,7 @@ def restore_residualizer_shape(a: np.ndarray, vec_input: bool) -> np.ndarray:
 
 def scale_design_columns(design: np.ndarray) -> np.ndarray:
     """Equilibrate nonzero design columns without changing their span."""
+    design = np.asarray(design, dtype=float)
     scales = np.max(np.abs(design), axis=0)
     return np.divide(design, scales, out=np.zeros_like(design), where=scales > 0)
 
@@ -193,30 +194,44 @@ def iv_projector_factors(
             "IV residualizer requires X and Z to have the same number of rows."
         )
     if demean is not None:
-        x = demean(x, context="IV residualizer X")
-        z = demean(z, context="IV residualizer Z")
+        x = demean(x, context="IV residualizer X", drop_absorbed=True)
+        z = demean(z, context="IV residualizer Z", drop_absorbed=True)
     x = scale_design_columns(x)
     qz = orthonormal_design_span(z, tol=tol)
     left, singular, right = np.linalg.svd(qz.T @ x, full_matrices=False)
     if (
         singular.size < x.shape[1]
         or not singular.size
-        or singular[-1] <= tol * singular[0]
+        or singular[-1] <= tol * max(1.0, singular[0])
     ):
         raise ValueError("IV residualizer is rank deficient: X'P_ZX is not full rank.")
     # X (Q_Z'X)^+ Q_Z' equals the 2SLS hat matrix without its normal equations.
     return x, (qz @ (left / singular)) @ right
 
 
-def make_ols_residualizer(
-    design: np.ndarray, *, demean=None, require_full_rank: bool = False
-):
-    """Build a conditional OLS residualizer from one equilibrated decomposition."""
+def ols_design_span(
+    design: MatrixLike, *, demean=None, require_full_rank: bool = False
+) -> np.ndarray:
+    """Prepare the OLS nuisance span for either backend."""
+    design, _ = coerce_numeric_matrix(design, "OLS residualizer X")
     if demean is not None:
-        design = demean(design, context="OLS residualizer X")
+        design = demean(design, context="OLS residualizer X", drop_absorbed=True)
     qx = orthonormal_design_span(design, tol=1e-10 if require_full_rank else None)
     if require_full_rank and qx.shape[1] != design.shape[1]:
         raise ValueError("OLS residualizer is rank deficient.")
+    return qx
+
+
+def make_ols_residualizer(
+    design: MatrixLike, *, demean=None, require_full_rank: bool = False
+):
+    """Build a conditional OLS residualizer from one equilibrated decomposition."""
+    qx = ols_design_span(design, demean=demean, require_full_rank=require_full_rank)
+    return make_orthogonal_residualizer(qx, demean=demean)
+
+
+def make_orthogonal_residualizer(qx: np.ndarray, *, demean=None):
+    """Apply an OLS nuisance basis to spatial directions."""
 
     def residualize(values: MatrixLike) -> np.ndarray:
         centered = np.asarray(values, dtype=float)
@@ -477,37 +492,86 @@ def make_fixef_demeaner(fixef_id: ArrayLike, n: int):
     from pyfixest.core.demean import demean_within
 
     fe_codes = encode_fixef_id(fixef_id, n)
-    first_codes = fe_codes[:, 0]
-    first_rows = np.full(int(first_codes.max()) + 1, n, dtype=int)
-    np.minimum.at(first_rows, first_codes, np.arange(n))
-    anchors = first_rows[first_codes]
+    counts = [np.bincount(codes) for codes in fe_codes.T]
+    anchors = []
+    rows = np.arange(n)
+    for codes, sizes in zip(fe_codes.T, counts, strict=True):
+        first_rows = np.full(len(sizes), n, dtype=int)
+        np.minimum.at(first_rows, codes, rows)
+        anchors.append(first_rows[codes])
     weights = np.ones(n)
     groups = fe_codes.astype(np.uintp, copy=False)
 
-    def demean(values: MatrixLike, *, context: str) -> np.ndarray:
+    def group_means(values: np.ndarray, codes: np.ndarray, sizes: np.ndarray):
+        sums = np.zeros((len(sizes), values.shape[1]))
+        np.add.at(sums, codes, values)
+        return sums / sizes[:, None]
+
+    def demean(
+        values: MatrixLike, *, context: str, drop_absorbed: bool = False
+    ) -> np.ndarray:
         matrix, vector = coerce_numeric_matrix(values, context)
         if matrix.shape[0] != n:
             raise ValueError(f"{context} does not line up with the fixed effects.")
         if matrix.shape[1] == 0:
             return matrix.copy()
 
-        # A first-group shift lies in the absorbed space. Remove it before
-        # scaling so a large FE offset does not determine solver precision.
-        shifted = matrix - matrix[anchors]
-        scales = np.max(np.abs(shifted), axis=0)
+        # Compare shifts in the absorbed space before scaling. A large group
+        # offset can occur in any effect, and in different effects by column.
+        shifted = matrix.copy()
+        original = np.max(np.abs(matrix), axis=0)
+        scales = original.copy()
+        for anchor in anchors:
+            with np.errstate(over="ignore"):
+                candidate = matrix - matrix[anchor]
+            candidate_scales = np.max(np.abs(candidate), axis=0)
+            better = candidate_scales < scales
+            shifted[:, better] = candidate[:, better]
+            scales[better] = candidate_scales[better]
         scales[scales == 0] = 1.0
-        out, converged = demean_within(
-            x=shifted / scales,
-            flist=groups,
-            weights=weights,
-            tol=1e-14,
-            maxiter=10_000,
-        )
-        if not converged or not np.isfinite(out).all():
-            raise ValueError(f"{context} fixed-effect demeaning did not converge.")
-        # Do not rescale residual roundoff into a new identifying direction.
-        zero = np.max(np.abs(out), axis=0) <= 64 * np.finfo(float).eps
-        out[:, zero] = 0.0
+        shifted /= scales
+        # A difference smaller than one input spacing can be introduced by
+        # rounding the absorbed levels. Retain contrasts at or above it.
+        noise = (original - np.nextafter(original, 0.0)) / scales
+        if len(anchors) == 1:
+            codes = fe_codes[:, 0]
+            out = shifted - group_means(shifted, codes, counts[0])[codes]
+        else:
+
+            def solve(x: np.ndarray) -> np.ndarray:
+                out, converged = demean_within(
+                    x=x, flist=groups, weights=weights, tol=1e-14, maxiter=10_000
+                )
+                if not converged or not np.isfinite(out).all():
+                    raise ValueError(
+                        f"{context} fixed-effect demeaning did not converge."
+                    )
+                return out
+
+            out = solve(shifted)
+            # Check the group moments against the achieved within scale.
+            # An absolute solver tolerance can leave substantial leakage
+            # when most of the variation was absorbed.
+            for step in range(7):
+                size = np.max(np.abs(out), axis=0)
+                moment = np.zeros_like(size)
+                for codes, sizes in zip(fe_codes.T, counts, strict=True):
+                    np.maximum(
+                        moment,
+                        np.max(np.abs(group_means(out, codes, sizes)), axis=0),
+                        out=moment,
+                    )
+                refine = (moment > 1e-11 * size) & (size >= noise)
+                if not np.any(refine):
+                    break
+                if step == 6:
+                    raise ValueError(
+                        f"{context} fixed-effect demeaning did not reach the required "
+                        "group-moment tolerance."
+                    )
+                out[:, refine] = solve(out[:, refine] / size[refine]) * size[refine]
+        if drop_absorbed:
+            out[:, np.max(np.abs(out), axis=0) < noise] = 0.0
         return restore_residualizer_shape(out * scales, vector)
 
     return demean

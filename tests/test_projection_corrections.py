@@ -40,6 +40,15 @@ def test_unconditional_scpc_skips_conditional_design(monkeypatch, backend):
     assert np.isfinite(out.scpcstats).all()
 
 
+def test_pyfixest_model_without_ols_metadata_is_rejected():
+    rng = np.random.default_rng(188)
+    df = pd.DataFrame(rng.normal(size=(30, 3)), columns=["y", "x", "s"])
+    model = pf.feols("y ~ x", df)
+    del model._method
+    with pytest.raises(NotImplementedError, match="OLS"):
+        scpc(model, df, coords_euclidean=["s"], backend="fallback")
+
+
 def test_oblique_weights_match_direct_matrix():
     rng = np.random.default_rng(39)
     x = np.column_stack((np.ones(12), rng.normal(size=12)))
@@ -111,6 +120,27 @@ def test_absorbed_fe_matches_dummies(backend, cluster):
     np.testing.assert_allclose(absorbed.scpcstats[0], dummy.scpcstats[-1], atol=2e-7)
     assert absorbed.scpccvs is not None and dummy.scpccvs is not None
     np.testing.assert_allclose(absorbed.scpccvs[0], dummy.scpccvs[-1], atol=2e-7)
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_absorbed_ols_rebuilds_the_same_formula_basis_for_both_backends(backend):
+    rng = np.random.default_rng(799)
+    n = 40
+    df = pd.DataFrame(rng.normal(size=(n, 3)), columns=["x", "y", "s"])
+    df["fe"] = np.repeat(np.arange(n // 5), 5)
+
+    def square(x):
+        return x**2
+
+    fit = pf.feols("y ~ square(x) | fe", df, context={"square": square})
+    kwargs: dict[str, Any] = dict(coords_euclidean=["s"], cvs=True, nthreads=1)
+    expected = scpc(fit, df, backend="fallback", **kwargs)
+    # Simulate nuisance leakage in the stored, already-demeaned fit matrix.
+    fit._X = fit._X + 1e4 * np.asarray(df["fe"])[:, None]
+    actual = scpc(fit, df, backend=backend, **kwargs)
+    np.testing.assert_allclose(actual.scpcstats, expected.scpcstats, atol=1e-7)
+    assert actual.scpccvs is not None and expected.scpccvs is not None
+    np.testing.assert_allclose(actual.scpccvs, expected.scpccvs, atol=1e-7)
 
 
 def test_multiway_absorbed_fe_routes_to_fallback():

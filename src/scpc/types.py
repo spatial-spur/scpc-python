@@ -51,9 +51,11 @@ class ConditionalProjectionSetup:
     fixef_id: ArrayLike | None
     """Fixed-effect identifiers used for demeaning, if any."""
     residualize: Any | None = None
-    """Residualizer used by the conditional IV branch, if any."""
+    """Residualizer for absorbed OLS or IV."""
     is_iv: bool = False
     """Whether the conditional adjustment should use the IV branch."""
+    ols_basis: np.ndarray | None = None
+    """Common nuisance basis for conditional OLS with fixed effects."""
 
 
 @dataclass(slots=True)

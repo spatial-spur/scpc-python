@@ -75,7 +75,7 @@ def is_weighted_or_non_ols_model(model: ModelLike) -> bool:
             return True
         if getattr(model, "_weights_name", None) is not None:
             return True
-        if (getattr(model, "_method", None) or "feols") != "feols":
+        if getattr(model, "_method", None) != "feols":
             return True
         weights = getattr(model, "_weights", None)
         if weights is not None and not bool(
@@ -246,6 +246,7 @@ def scpc(
     cond_include_intercept = False
     cond_fixef_id = None
     cond_residualize = None
+    cond_ols_basis = None
     if not uncond:
         iv_design = get_fixest_iv_design(model) if model_is_iv else None
         model_mat = (
@@ -260,6 +261,7 @@ def scpc(
         cond_include_intercept = cond_setup.include_intercept
         cond_fixef_id = cond_setup.fixef_id
         cond_residualize = cond_setup.residualize
+        cond_ols_basis = cond_setup.ols_basis
         if model_mat_cond.shape != (n, p):
             raise ValueError(
                 f"Conditional projection has shape {model_mat_cond.shape}, "
@@ -407,10 +409,13 @@ def scpc(
                     rust_xjs = xjs_mat
                 else:
                     fe_arg = fe_id_0based
-                    proj_u, proj_v = compute_orthogonal_projector(
-                        model_mat_cond,
-                        include_intercept=cond_include_intercept,
-                    )
+                    if cond_ols_basis is not None:
+                        proj_u = proj_v = np.ascontiguousarray(cond_ols_basis)
+                    else:
+                        proj_u, proj_v = compute_orthogonal_projector(
+                            model_mat_cond,
+                            include_intercept=cond_include_intercept,
+                        )
                     rust_xj = xj_mat
                     rust_xjs = xjs_mat
 

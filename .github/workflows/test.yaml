@@ -63,6 +63,10 @@ jobs:
         - uses: astral-sh/setup-uv@v8.0.0
           with:
             python-version: '3.11'
+        - name: Install R
+          uses: r-lib/actions/setup-r@v2
+          with:
+            r-version: "release"
         - name: Install dependencies and build the native extension
           run: |
             rustup toolchain install stable --profile minimal
@@ -71,4 +75,4 @@ jobs:
         - name: Require the compatible native extension
           run: uv run --no-sync python -c 'from scpc.core import load_rust_backend; assert load_rust_backend() is not None'
         - name: Test native execution and fallback parity
-          run: uv run --no-sync -m pytest tests/test_rust_m1.py tests/test_lnget_oms.py tests/test_projection_corrections.py
+          run: uv run --no-sync -m pytest

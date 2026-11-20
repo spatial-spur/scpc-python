@@ -14,7 +14,12 @@ from ..types import (
     MatrixLike,
     ModelLike,
 )
-from .matrix import make_fixef_demeaner, make_iv_residualizer, make_ols_residualizer
+from .matrix import (
+    make_fixef_demeaner,
+    make_iv_residualizer,
+    make_orthogonal_residualizer,
+    ols_design_span,
+)
 
 
 def is_pyfixest_model(model: ModelLike) -> bool:
@@ -82,6 +87,19 @@ def make_pyfixest_demeaner(model: ModelLike):
     """Build the unweighted conditional projector for the fitted FE sample."""
     fe = model._fe
     return make_fixef_demeaner(fe, len(fe))
+
+
+def get_pyfixest_raw_ols_design(model: ModelLike, n: int) -> np.ndarray:
+    """Recreate the fitted columns before PyFixest's iterative absorption."""
+    data = get_pyfixest_data(model)
+    design = model._model_spec.second_stage.rhs.get_model_matrix(
+        data, context=model._context
+    )
+    if not design.index.equals(data.index):
+        raise ValueError("PyFixest OLS design does not line up with the fitted sample.")
+    return get_pyfixest_named_columns(
+        design, get_pyfixest_coef_names(model), n=n, context="PyFixest OLS regressor"
+    )
 
 
 def is_fixest_iv_second_stage(model: ModelLike) -> bool:
@@ -469,16 +487,17 @@ def get_conditional_projection_setup(
 
         if has_fixest_fe(model):
             demean = make_pyfixest_demeaner(model)
-
+            raw = get_pyfixest_raw_ols_design(model, n)
+            model_mat = demean(
+                raw, context="PyFixest OLS regressor", drop_absorbed=True
+            )
+            ols_basis = ols_design_span(model_mat, require_full_rank=True)
             return ConditionalProjectionSetup(
                 model_mat=model_mat,
                 include_intercept=False,
                 fixef_id=np.asarray(getattr(model, "_fe")),
-                residualize=defer_residualizer(
-                    lambda: make_ols_residualizer(
-                        model_mat, demean=demean, require_full_rank=True
-                    )
-                ),
+                residualize=make_orthogonal_residualizer(ols_basis, demean=demean),
+                ols_basis=ols_basis,
             )
 
         return setup
