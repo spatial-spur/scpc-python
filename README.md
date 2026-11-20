@@ -46,6 +46,10 @@ published, build and install it from the matching shared-core checkout.
 uv pip install ../spatial-rust/crates/spatial-py
 ```
 
+The standard Arm64 native build can use OxiBLAS's SME2 kernels automatically
+on supported systems. Set `OXIBLAS_DISABLE_SME2=1` before starting Python to
+use regular CPU dispatch.
+
 Approximate SCPC raises `scpc.InvalidSampledCovarianceError` if its sampled
 covariance matrix is asymmetric or materially indefinite. For samples that fit
 in memory, request `method="exact"` to compute the unsampled covariance.
