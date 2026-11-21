@@ -220,7 +220,7 @@ def test_cluster_validation_uses_only_rows_kept_by_the_fit() -> None:
 
 
 def make_direct_ffi_inputs() -> tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
 ]:
     coords = np.array(
         [
@@ -233,7 +233,7 @@ def make_direct_ffi_inputs() -> tuple[
         dtype=np.float64,
     )
     coef = np.array([1.0, 0.9], dtype=np.float64)
-    wj = np.array(
+    scores = np.array(
         [
             [0.1, -0.2],
             [0.3, 0.4],
@@ -243,7 +243,7 @@ def make_direct_ffi_inputs() -> tuple[
         ],
         dtype=np.float64,
     )
-    xj = np.array(
+    design = np.array(
         [
             [1.0, -1.0],
             [1.0, -0.5],
@@ -253,43 +253,36 @@ def make_direct_ffi_inputs() -> tuple[
         ],
         dtype=np.float64,
     )
-    xjs = np.sign(xj)
-    u, _, _ = np.linalg.svd(xj, full_matrices=False)
-    return coords, coef, wj, xj, xjs, u
+    bread = np.array([[0.4, 0.06], [0.06, 0.25]])
+    return coords, coef, bread, scores, design
 
 
 def test_spatial_spur_rust_api_version_fortran_layout_and_validation() -> None:
     rust_mod: Any = require_rust()
     assert rust_mod.API_VERSION == 7
 
-    coords, coef, wj, xj, xjs, u = make_direct_ffi_inputs()
+    coords, coef, bread, scores, design = make_direct_ffi_inputs()
 
-    res_c = rust_mod.run_exact_scpc(
+    res_c = rust_mod.run_model_scpc(
         coords,
         coef,
-        wj,
+        bread,
+        scores,
         0.1,
         latlong=False,
-        uncond=False,
         cvs=True,
-        xj=xj,
-        xjs=xjs,
-        proj_u=u,
-        proj_v=u,
+        design=design,
         nthreads=1,
     )
-    res_f = rust_mod.run_exact_scpc(
+    res_f = rust_mod.run_model_scpc(
         np.asfortranarray(coords),
         coef,
-        np.asfortranarray(wj),
+        np.asfortranarray(bread),
+        np.asfortranarray(scores),
         0.1,
         latlong=False,
-        uncond=False,
         cvs=True,
-        xj=np.asfortranarray(xj),
-        xjs=np.asfortranarray(xjs),
-        proj_u=np.asfortranarray(u),
-        proj_v=np.asfortranarray(u),
+        design=np.asfortranarray(design),
         nthreads=1,
     )
 
@@ -305,45 +298,43 @@ def test_spatial_spur_rust_api_version_fortran_layout_and_validation() -> None:
     bad_coords = coords.copy()
     bad_coords[0, 0] = np.nan
     with pytest.raises(ValueError, match="finite"):
-        rust_mod.run_exact_scpc(bad_coords, coef, wj, 0.1, uncond=True)
+        rust_mod.run_model_scpc(bad_coords, coef, bread, scores, 0.1)
 
     with pytest.raises(ValueError, match="avc"):
-        rust_mod.run_exact_scpc(coords, coef, wj, 0.001, uncond=True)
+        rust_mod.run_model_scpc(coords, coef, bread, scores, 0.001)
 
-    with pytest.raises(ValueError, match="wj"):
-        rust_mod.run_exact_scpc(coords, coef, wj[:3, :], 0.1, uncond=True)
+    with pytest.raises(ValueError, match="scores"):
+        rust_mod.run_model_scpc(coords, coef, bread, scores[:3, :], 0.1)
 
-    with pytest.raises(ValueError, match="proj_u and proj_v"):
-        rust_mod.run_exact_scpc(
-            coords, coef, wj, 0.1, uncond=False, xj=xj, xjs=xjs, proj_u=u
-        )
+    with pytest.raises(ValueError, match="conditional model matrices"):
+        rust_mod.run_model_scpc(coords, coef, bread, scores, 0.1, instruments=design)
+
+    with pytest.raises(ValueError, match="design"):
+        rust_mod.run_model_scpc(coords, coef, bread, scores, 0.1, design=design[:3])
 
     with pytest.raises(ValueError, match="2 columns"):
-        rust_mod.run_exact_scpc(coords[:, :1], coef, wj, 0.1, latlong=True, uncond=True)
+        rust_mod.run_model_scpc(coords[:, :1], coef, bread, scores, 0.1, latlong=True)
 
     with pytest.raises(ValueError, match="nthreads"):
-        rust_mod.run_exact_scpc(coords, coef, wj, 0.1, uncond=True, nthreads=0)
+        rust_mod.run_model_scpc(coords, coef, bread, scores, 0.1, nthreads=0)
 
     with pytest.raises(TypeError, match="nthreads"):
-        rust_mod.run_exact_scpc(coords, coef, wj, 0.1, uncond=True, nthreads=True)
+        rust_mod.run_model_scpc(coords, coef, bread, scores, 0.1, nthreads=True)
 
 
 def test_rust_ffi_arbitrary_strides_unaligned_and_sliced_views() -> None:
     rust_mod: Any = require_rust()
-    coords, coef, wj, xj, xjs, u = make_direct_ffi_inputs()
+    coords, coef, bread, scores, design = make_direct_ffi_inputs()
 
-    ref = rust_mod.run_exact_scpc(
+    ref = rust_mod.run_model_scpc(
         coords,
         coef,
-        wj,
+        bread,
+        scores,
         0.1,
         latlong=False,
-        uncond=False,
         cvs=True,
-        xj=xj,
-        xjs=xjs,
-        proj_u=u,
-        proj_v=u,
+        design=design,
         nthreads=1,
     )
 
@@ -361,17 +352,14 @@ def test_rust_ffi_arbitrary_strides_unaligned_and_sliced_views() -> None:
         return view
 
     # (24, 9) non-multiple-of-8 byte stride
-    res_strided = rust_mod.run_exact_scpc(
+    res_strided = rust_mod.run_model_scpc(
         make_byte_strided_2d(coords, (24, 9)),
         coef,
-        make_byte_strided_2d(wj, (24, 9)),
+        make_byte_strided_2d(bread, (24, 9)),
+        make_byte_strided_2d(scores, (24, 9)),
         0.1,
-        uncond=False,
         cvs=True,
-        xj=make_byte_strided_2d(xj, (24, 9)),
-        xjs=make_byte_strided_2d(xjs, (24, 9)),
-        proj_u=make_byte_strided_2d(u, (24, 9)),
-        proj_v=make_byte_strided_2d(u, (24, 9)),
+        design=make_byte_strided_2d(design, (24, 9)),
         nthreads=1,
     )
     npt.assert_allclose(
@@ -380,17 +368,14 @@ def test_rust_ffi_arbitrary_strides_unaligned_and_sliced_views() -> None:
     assert res_strided["c0"] == pytest.approx(ref["c0"], rel=1e-14, abs=1e-14)
 
     # Unaligned C-contiguous views (offset by 1 byte)
-    res_unaligned = rust_mod.run_exact_scpc(
+    res_unaligned = rust_mod.run_model_scpc(
         make_unaligned_c(coords),
         make_unaligned_c(coef),
-        make_unaligned_c(wj),
+        make_unaligned_c(bread),
+        make_unaligned_c(scores),
         0.1,
-        uncond=False,
         cvs=True,
-        xj=make_unaligned_c(xj),
-        xjs=make_unaligned_c(xjs),
-        proj_u=make_unaligned_c(u),
-        proj_v=make_unaligned_c(u),
+        design=make_unaligned_c(design),
         nthreads=1,
     )
     npt.assert_allclose(
@@ -405,24 +390,20 @@ def test_rust_ffi_arbitrary_strides_unaligned_and_sliced_views() -> None:
     assert coef_rev.strides[0] == -8
 
     coords_neg = coords[::-1, ::-1].copy()[::-1, ::-1]
-    wj_neg = wj[::-1, ::-1].copy()[::-1, ::-1]
-    xj_neg = xj[::-1, ::-1].copy()[::-1, ::-1]
-    xjs_neg = xjs[::-1, ::-1].copy()[::-1, ::-1]
-    u_neg = u[::-1, ::-1].copy()[::-1, ::-1]
+    bread_neg = bread[::-1, ::-1].copy()[::-1, ::-1]
+    scores_neg = scores[::-1, ::-1].copy()[::-1, ::-1]
+    design_neg = design[::-1, ::-1].copy()[::-1, ::-1]
     assert coords_neg.strides[0] < 0 and coords_neg.strides[1] < 0
 
     for coef_view in (coef_step2, coef_rev):
-        res_neg = rust_mod.run_exact_scpc(
+        res_neg = rust_mod.run_model_scpc(
             coords_neg,
             coef_view,
-            wj_neg,
+            bread_neg,
+            scores_neg,
             0.1,
-            uncond=False,
             cvs=True,
-            xj=xj_neg,
-            xjs=xjs_neg,
-            proj_u=u_neg,
-            proj_v=u_neg,
+            design=design_neg,
             nthreads=1,
         )
         npt.assert_allclose(
@@ -434,37 +415,31 @@ def test_rust_ffi_arbitrary_strides_unaligned_and_sliced_views() -> None:
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork not available")
 def test_rust_fork_safety_after_warming_threads() -> None:
     rust_mod: Any = require_rust()
-    coords, coef, wj, xj, xjs, u = make_direct_ffi_inputs()
+    coords, coef, bread, scores, design = make_direct_ffi_inputs()
 
     # Initialize the native pool in the parent before forking.
-    rust_mod.run_exact_scpc(
+    rust_mod.run_model_scpc(
         coords,
         coef,
-        wj,
+        bread,
+        scores,
         0.1,
-        uncond=False,
         cvs=True,
-        xj=xj,
-        xjs=xjs,
-        proj_u=u,
-        proj_v=u,
+        design=design,
         nthreads=2,
     )
 
     pid = os.fork()
     if pid == 0:
         try:
-            rust_mod.run_exact_scpc(
+            rust_mod.run_model_scpc(
                 coords,
                 coef,
-                wj,
+                bread,
+                scores,
                 0.1,
-                uncond=False,
                 cvs=True,
-                xj=xj,
-                xjs=xjs,
-                proj_u=u,
-                proj_v=u,
+                design=design,
                 nthreads=1,
             )
         except RuntimeError as err:
@@ -488,7 +463,7 @@ def test_rust_fork_safety_after_warming_threads() -> None:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
         raise AssertionError(
-            "forked child deadlocked or timed out in run_exact_scpc(nthreads=1)"
+            "forked child deadlocked or timed out in run_model_scpc(nthreads=1)"
         )
 
     assert os.WIFEXITED(status)
@@ -508,16 +483,16 @@ from multiprocessing import get_context
 from tests.test_rust_m1 import make_direct_ffi_inputs, require_rust
 
 native = require_rust()
-coords, coef, scores, *_ = make_direct_ffi_inputs()
+coords, coef, bread, scores, _ = make_direct_ffi_inputs()
 try:
-    native.run_exact_scpc(coords, coef, scores[:-1], 0.1, uncond=True)
+    native.run_model_scpc(coords, coef, bread, scores[:-1], 0.1)
 except ValueError:
     pass
 else:
     raise AssertionError("Invalid score shape was accepted")
 
 def run_valid():
-    native.run_exact_scpc(coords, coef, scores, 0.1, uncond=True, nthreads=1)
+    native.run_model_scpc(coords, coef, bread, scores, 0.1, nthreads=1)
 
 child = get_context("fork").Process(target=run_valid)
 child.start()
@@ -891,12 +866,12 @@ def test_near_zero_t_statistic_probability() -> None:
         npt.assert_allclose(res_rust.scpcstats, res_fb.scpcstats, atol=1e-12, rtol=0.0)
 
         rust_mod: Any = require_rust()
-        direct = rust_mod.run_exact_scpc(
+        direct = rust_mod.run_model_scpc(
             np.array([[0.0], [1.0]]),
             np.array([1e-6]),
-            np.array([[1.0 + 1e-6], [-1.0 + 1e-6]]),
+            np.array([[0.5]]),
+            np.array([[1.0], [-1.0]]),
             0.03,
-            uncond=True,
             nthreads=1,
         )
         assert direct["q"] == 1
