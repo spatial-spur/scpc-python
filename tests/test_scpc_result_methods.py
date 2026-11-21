@@ -95,3 +95,10 @@ def test_confint_uses_stored_critical_values_for_non_95_levels() -> None:
 def test_confint_requires_stored_critical_values_for_non_95_levels() -> None:
     with pytest.raises(ValueError, match="not available"):
         make_result().confint(level=0.90)
+
+
+def test_confint_rejects_unsupported_level_with_value_error() -> None:
+    with pytest.raises(ValueError, match="Confidence level 0.8 is not available"):
+        make_result(cvs=True).confint(level=0.80)
+    with pytest.raises(ValueError, match="Confidence level 0.8 is not available"):
+        make_result(cvs=False).confint(level=0.80)

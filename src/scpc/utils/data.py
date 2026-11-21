@@ -115,7 +115,7 @@ def _eval_pyfixest_rhs_design(
     """Evaluate a PyFixest RHS ModelSpec with a clean encoder state for i() terms."""
     context = _get_pyfixest_formula_context(model)
     formula = getattr(rhs_spec, "formula", None)
-    if formula is not None and getattr(model, "_icovars", None) is not None:
+    if formula is not None:
         return formula.get_model_matrix(data, context=context)
     return rhs_spec.get_model_matrix(data, context=context)
 
@@ -390,16 +390,14 @@ def get_fixest_iv_design(
             "first-stage objects."
         )
 
-    has_intercept = "Intercept" in coef_names
-    exo_no_intercept = [name for name in exo_names if name != "Intercept"]
-    intercept = (
-        np.ones((n, 1), dtype=float) if has_intercept else np.empty((n, 0), dtype=float)
-    )
     model_spec = getattr(model, "_model_spec", None)
     exo_source = data
     if (
-        exo_no_intercept
-        and any(name not in data.columns for name in exo_no_intercept)
+        exo_names
+        and (
+            any(name not in data.columns for name in exo_names)
+            or "Intercept" in exo_names
+        )
         and model_spec is not None
         and hasattr(model_spec, "second_stage")
     ):
@@ -417,22 +415,40 @@ def get_fixest_iv_design(
         if inst_design.index.equals(data.index):
             inst_source = inst_design
 
-    exo = get_pyfixest_named_columns(
-        exo_source,
-        exo_no_intercept,
-        n=n,
-        context="PyFixest IV exogenous regressor",
-    )
+    def _source_col(source: DataFrameLike, name: str, context: str) -> np.ndarray:
+        if name in source.columns:
+            col = np.asarray(source[name], dtype=float)
+            if col.shape != (n,):
+                raise ValueError(f"{context} column '{name}' has unexpected shape.")
+            return col
+        if name == "Intercept":
+            return np.ones(n, dtype=float)
+        raise ValueError(f"{context} column '{name}' is missing from stored data.")
+
+    raw_col_map: dict[str, np.ndarray] = {}
+    fit_col_map: dict[str, np.ndarray] = {}
+    for name in exo_names:
+        col = _source_col(exo_source, name, "PyFixest IV exogenous regressor")
+        raw_col_map[name] = col
+        fit_col_map[name] = col
+    for idx, name in enumerate(endo_names):
+        raw_col_map[name] = raw_endog[:, idx]
+        fit_col_map[name] = fit_endog[:, idx]
+
     inst = get_pyfixest_named_columns(
         inst_source,
         inst_names,
         n=n,
         context="PyFixest IV instrument",
     )
-
-    x = np.column_stack((intercept, exo, raw_endog))
-    z = np.column_stack((intercept, exo, inst))
-    model_mat = np.column_stack((intercept, exo, fit_endog))
+    exo_for_z = (
+        np.column_stack([raw_col_map[name] for name in exo_names])
+        if exo_names
+        else np.empty((n, 0), dtype=float)
+    )
+    x = np.column_stack([raw_col_map[name] for name in coef_names])
+    z = np.column_stack((exo_for_z, inst))
+    model_mat = np.column_stack([fit_col_map[name] for name in coef_names])
 
     if x.shape[1] != len(coef_names):
         raise ValueError(

@@ -227,6 +227,8 @@ def scpc(
             "Build the matching development adapter or use backend='fallback'."
         )
 
+    obs_index = get_obs_index(model, data)
+
     if is_pyfixest_model(model):
         s = np.asarray(get_fixest_score_matrix(model), dtype=float)
         bread_inv = np.asarray(get_fixest_bread_inv(model), dtype=float)
@@ -243,7 +245,6 @@ def scpc(
         raise ValueError("SCPC requires at least one fitted coefficient.")
     neff = n
 
-    obs_index = get_obs_index(model, data)
     coord_info = resolve_coords_input(data, obs_index, lon, lat, coords_euclidean)
     coords = np.asarray(coord_info.coords, dtype=float)
     latlong = coord_info.latlong

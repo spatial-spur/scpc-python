@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.testing as npt
+import pandas as pd
 import pyfixest as pf
 import pytest
 
@@ -284,3 +285,126 @@ def test_scpc_rejects_fixest_multi_objects() -> None:
             uncond=True,
             cvs=False,
         )
+
+
+def test_scpc_pyfixest_iv_supports_i_instruments_and_literal_intercept_column() -> None:
+    rng = np.random.default_rng(404)
+    n = 48
+    inst_grp = rng.integers(0, 3, size=n)
+    w = rng.normal(size=n)
+    u = rng.normal(size=n)
+    z1 = (inst_grp == 1).astype(float)
+    z2 = (inst_grp == 2).astype(float)
+    x = 0.9 * z1 - 0.8 * z2 + 0.35 * w + 0.45 * u
+    literal_col = rng.normal(size=n)
+    y = 1.2 * x + 0.4 * w + 0.6 * literal_col + u
+    fe = np.repeat(np.arange(4), n // 4)
+    df = pd.DataFrame(
+        {
+            "y": y,
+            "x": x,
+            "w": w,
+            "inst_grp": inst_grp,
+            "z1": z1,
+            "z2": z2,
+            "Intercept": literal_col,
+            "literal_col": literal_col,
+            "fe": fe,
+            "coord_x": rng.uniform(0.0, 1.0, size=n),
+            "coord_y": rng.uniform(0.0, 1.0, size=n),
+        }
+    )
+
+    # 1) PyFixest i() instrument matches explicit indicator columns (both OLS-IV and FE-IV)
+    for formula_i, formula_exp in [
+        ("y ~ w | x ~ i(inst_grp)", "y ~ w | x ~ z1 + z2"),
+        ("y ~ w | fe | x ~ i(inst_grp)", "y ~ w | fe | x ~ z1 + z2"),
+    ]:
+        res_i = scpc(
+            pf.feols(formula_i, data=df),
+            df,
+            coords_euclidean=("coord_x", "coord_y"),
+            avc=0.1,
+            uncond=False,
+            cvs=True,
+        )
+        res_exp = scpc(
+            pf.feols(formula_exp, data=df),
+            df,
+            coords_euclidean=("coord_x", "coord_y"),
+            avc=0.1,
+            uncond=False,
+            cvs=True,
+        )
+        npt.assert_allclose(res_i.c0, res_exp.c0, rtol=1e-12, atol=1e-12)
+        npt.assert_allclose(res_i.cv, res_exp.cv, rtol=1e-12, atol=1e-12)
+        npt.assert_allclose(res_i.scpcstats, res_exp.scpcstats, rtol=1e-10, atol=1e-10)
+
+    # 2) Literal column named "Intercept" in a 0 + Intercept specification
+    res_lit = scpc(
+        pf.feols("y ~ 0 + Intercept + w | x ~ z1 + z2", data=df),
+        df,
+        coords_euclidean=("coord_x", "coord_y"),
+        avc=0.1,
+        uncond=False,
+        cvs=True,
+    )
+    res_ref = scpc(
+        pf.feols("y ~ 0 + literal_col + w | x ~ z1 + z2", data=df),
+        df,
+        coords_euclidean=("coord_x", "coord_y"),
+        avc=0.1,
+        uncond=False,
+        cvs=True,
+    )
+    npt.assert_allclose(res_lit.scpcstats, res_ref.scpcstats, rtol=1e-10, atol=1e-10)
+    npt.assert_allclose(res_lit.w, res_ref.w, rtol=1e-10, atol=1e-10)
+
+
+def test_scpc_pyfixest_lean_error_and_extreme_coordinate_scaling() -> None:
+    rng = np.random.default_rng(505)
+    n = 36
+    x = rng.normal(size=n)
+    s1 = rng.uniform(0.0, 1.0, size=n)
+    s2 = rng.uniform(0.0, 1.0, size=n)
+    df = pd.DataFrame(
+        {
+            "y": 0.5 + 1.1 * x + 0.3 * rng.normal(size=n),
+            "x": x,
+            "s1": s1,
+            "s2": s2,
+            "s1_tiny": s1 * 1e-200,
+            "s2_tiny": s2 * 1e-200,
+            "s1_huge": s1 * 1e200,
+            "s2_huge": s2 * 1e200,
+        }
+    )
+
+    lean_fit = pf.feols("y ~ x", data=df, lean=True)
+    with pytest.raises(ValueError, match="lean=False"):
+        scpc(lean_fit, df, coords_euclidean=("s1", "s2"))
+
+    fit = pf.feols("y ~ x", data=df)
+    for method in ("exact", "approx"):
+        ref = scpc(
+            fit,
+            df,
+            coords_euclidean=("s1", "s2"),
+            method=method,
+            large_n_seed=11,
+            backend="fallback",
+            avc=0.05,
+        )
+        for pair in (("s1_tiny", "s2_tiny"), ("s1_huge", "s2_huge")):
+            scaled = scpc(
+                fit,
+                df,
+                coords_euclidean=pair,
+                method=method,
+                large_n_seed=11,
+                backend="fallback",
+                avc=0.05,
+            )
+            assert np.isfinite(scaled.scpcstats).all()
+            npt.assert_allclose(scaled.cv, ref.cv, rtol=1e-10, atol=1e-10)
+            npt.assert_allclose(scaled.scpcstats, ref.scpcstats, rtol=1e-10, atol=1e-10)

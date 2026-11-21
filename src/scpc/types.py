@@ -254,7 +254,7 @@ class SCPCResult:
         if level == 0.95:
             values = stats[idx, 4:6]
         else:
-            if self.scpccvs is None:
+            if self.scpccvs is None or level not in SCPC_CV_LEVELS:
                 raise ValueError(f"Confidence level {level} is not available.")
             level_idx = SCPC_CV_LEVELS[level]
             cvs = np.asarray(self.scpccvs, dtype=float)

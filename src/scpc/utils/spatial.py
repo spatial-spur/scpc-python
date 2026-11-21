@@ -113,7 +113,7 @@ def get_distmat(s: MatrixLike, latlong: bool) -> MatrixLike:
         d = 2 * 6378137 * np.arcsin(np.sqrt(a))
         d = d / (2 * math.pi * 6378137)
     else:
-        d = np.sqrt(np.sum((s[:, None, :] - s[None, :, :]) ** 2, axis=2))
+        d = np.hypot.reduce(s[:, None, :] - s[None, :, :], axis=2)
 
     return d
 
@@ -142,7 +142,7 @@ def get_distvec(s1: MatrixLike, s2: MatrixLike, latlong: bool) -> ArrayLike:
         )
         return np.arcsin(np.sqrt(a)) / math.pi
 
-    return np.sqrt(np.sum((s1 - s2) ** 2, axis=1))
+    return np.hypot.reduce(s1 - s2, axis=1)
 
 
 def normalize_s(s: MatrixLike, latlong: bool) -> tuple[MatrixLike, ArrayLike]:
@@ -153,9 +153,14 @@ def normalize_s(s: MatrixLike, latlong: bool) -> tuple[MatrixLike, ArrayLike]:
 
     if not latlong:
         s = s - np.mean(s, axis=0, keepdims=True)
-        evals, rot = np.linalg.eigh(s.T @ s)
-        rot = rot[:, np.argsort(evals)[::-1]]
-        s = s @ rot
+        max_abs = float(np.max(np.abs(s))) if s.size > 0 else 0.0
+        if max_abs > 0.0:
+            s_scaled = s / max_abs
+            evals, rot = np.linalg.eigh(s_scaled.T @ s_scaled)
+            rot = rot[:, np.argsort(evals)[::-1]]
+            s = s_scaled @ rot
+        else:
+            s = np.zeros_like(s)
 
         # this keeps the randomized branch in a fixed orientation.
         if np.max(s[:, 0]) != np.max(np.abs(s[:, 0])):
@@ -857,8 +862,8 @@ def set_final_w(
         cvs[q - 1] = get_cv(oms, q, 0.05)
         lengths[q - 1] = (
             cvs[q - 1]
-            * math.gamma(0.5 * (q + 1))
-            / (math.sqrt(q) * math.gamma(0.5 * q))
+            * math.exp(math.lgamma(0.5 * (q + 1)) - math.lgamma(0.5 * q))
+            / math.sqrt(q)
         )
 
     q_opt = int(np.argmin(lengths)) + 1
@@ -880,7 +885,13 @@ def get_nc(c0: float, cmax: float, cgridfac: float) -> int:
     Returns:
         The number of grid points to evaluate.
     """
-    return max(2, math.ceil(math.log(cmax / c0) / math.log(cgridfac)))
+    ratio = cmax / c0
+    log_ratio = (
+        math.log(ratio)
+        if math.isfinite(ratio) and ratio > 0
+        else math.log(cmax) - math.log(c0)
+    )
+    return max(2, math.ceil(log_ratio / math.log(cgridfac)))
 
 
 def get_oms(
@@ -1009,7 +1020,7 @@ def set_oms_wfin(
         wfin, cvfin, q = set_final_w(oms, w, qmax)
         if q < qmax or qmax >= q_limit:
             break
-        qmax = round(qmax + qmax / 2)
+        qmax = qmax + (qmax + 1) // 2
 
     return SpatialSetup(
         wfin=wfin,
