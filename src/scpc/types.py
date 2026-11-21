@@ -83,7 +83,7 @@ class SpatialSetup:
     large_n: bool
     """Whether the approximate large-n branch was used."""
     random_state: int | None
-    """Random state carried forward by the approximate branch."""
+    """State after the unconditional grid, shared by all conditional pair draws."""
     tied: bool = False
     """Whether the leading spatial eigenspace had a numerical tie."""
 

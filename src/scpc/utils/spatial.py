@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 import numpy as np
 from scipy import optimize, stats
@@ -267,12 +268,18 @@ def lnset_wc0(
             wall[:, j * capN + i] = wx[:, j]
 
     w = np.zeros((n, qmax), dtype=float)
+    min_norm = math.sqrt(np.finfo(float).eps)
     for i in range(qmax):
         wx = wall[:, : capN * (i + 1)]
         evals, evecs = np.linalg.eigh(wx.T @ wx)
         evec = evecs[:, np.argmax(evals)]
         w[:, i] = wx @ evec
-        w[:, i] = w[:, i] / math.sqrt(np.sum(w[:, i] ** 2))
+        norm = math.sqrt(float(np.sum(w[:, i] ** 2)))
+        if not math.isfinite(norm) or norm <= min_norm:
+            raise ValueError(
+                "degenerate principal direction in Nystrom landmark consolidation"
+            )
+        w[:, i] = w[:, i] / norm
         wall = wall - np.outer(w[:, i], w[:, i] @ wall)
 
     w = np.column_stack((np.full(n, 1 / math.sqrt(n)), w))
@@ -293,6 +300,18 @@ def raninds(n: int, capM: int, random_t: int) -> tuple[ArrayLike, int]:
     return v, random_t
 
 
+def sample_covariance_pairs(
+    s: MatrixLike, capM: int, random_t: int, latlong: bool
+) -> tuple[tuple[np.ndarray, np.ndarray], int]:
+    """Draw a linked chain of distinct sites and measure each pair once."""
+    s = np.asarray(s, dtype=float)
+    if s.ndim == 1:
+        s = s.reshape(-1, 1)
+    indices, state = raninds(s.shape[0], capM, random_t)
+    distances = get_distvec(s[indices[:-1]], s[indices[1:]], latlong)
+    return (indices, distances), state
+
+
 def lnget_oms(
     s: MatrixLike,
     c0: float,
@@ -304,32 +323,39 @@ def lnget_oms(
     latlong: bool = False,
 ) -> tuple[list[MatrixLike], int]:
     """Approximate omega matrices for the large-n branch."""
-    s = np.asarray(s, dtype=float)
-    w = np.asarray(w, dtype=float)
-    if s.ndim == 1:
-        s = s.reshape(-1, 1)
+    pairs, state = sample_covariance_pairs(s, capM, random_t, latlong)
+    return sampled_covariance_grid(w, c0, cmax, cgridfac, pairs), state
 
+
+def sampled_covariance_grid(
+    w: MatrixLike,
+    c0: float,
+    cmax: float,
+    cgridfac: float,
+    pairs: tuple[np.ndarray, np.ndarray],
+) -> list[MatrixLike]:
+    """Evaluate the covariance grid using a fixed set of sampled site pairs."""
+    w = np.asarray(w, dtype=float)
     nc = get_nc(c0, cmax, cgridfac)
     oms: list[MatrixLike] = [np.empty((0, 0)) for _ in range(nc)]
 
-    n = s.shape[0]
-    inds, random_t = raninds(n, capM, random_t)
-    dist = get_distvec(s[inds[:capM], :], s[inds[1 : capM + 1], :], latlong)
-    w1 = w[inds[:capM], :]
-    w2 = w[inds[1 : capM + 1], :]
+    inds, dist = pairs
+    n = w.shape[0]
+    multiplier = 0.5 * n * (n - 1) / len(dist)
+    w1 = w[inds[:-1]]
+    w2 = w[inds[1:]]
 
     gram = w.T @ w
     c = c0
     for i in range(nc):
         cd = np.exp(-c * dist)
-        omega = gram + 0.5 * (n * (n - 1) / capM) * (
-            w1.T @ (w2 * cd[:, None]) + w2.T @ (w1 * cd[:, None])
-        )
+        cross = w1.T @ (w2 * cd[:, None])
+        omega = gram + multiplier * (cross + cross.T)
         validate_sampled_covariance(omega, i)
         oms[i] = omega
         c = c * cgridfac
 
-    return oms, random_t
+    return oms
 
 
 def validate_large_n_seed(seed: object) -> int:
@@ -542,6 +568,108 @@ def _integrate_angular(fn) -> float:
     return _quad_adaptive(fn, 0.0, half_pi, whole, tol, 0) * (2.0 / math.pi)
 
 
+def bivariate_rejection(a: float, b: float, d: float, cv: float) -> float:
+    """Use the Gaussian quadrant probability for (X - cv Y)(X + cv Y) > 0."""
+    tol = 64 * np.finfo(float).eps
+    magnitude = max(abs(a), abs(b), abs(d))
+    if magnitude == 0:
+        return 0.0
+    v0, v1 = a / magnitude + tol, d / magnitude + tol
+    if min(v0, v1) < 0 or abs(b) / magnitude > math.sqrt(v0) * math.sqrt(v1):
+        raise ValueError("SCPC covariance is not positive semidefinite.")
+    a, d = max(a, 0.0), max(d, 0.0)
+    if min(a, d) == 0.0:
+        return float(a > 0.0)
+    # Evaluate atan2(2 c sqrt(ad-b²), c²d-a) in independently scaled units.
+    # Exact products distinguish a tiny positive determinant from a strict tie.
+    ea, ed = (max(-1022, math.frexp(v)[1] - 1) for v in (a, d))
+    eb, parity = divmod(ea + ed, 2)
+    an, dn = math.ldexp(a, -ea), math.ldexp(d, -ed + parity)
+    t = cv * math.ldexp(1.0, eb - ea)
+    bn = Fraction.from_float(b) / Fraction(2) ** eb
+    an, dn = Fraction.from_float(an), Fraction.from_float(dn)
+    root = math.sqrt(float(max(0, an * dn - bn * bn)))
+    if t > 2**500:
+        spread, difference = 2 * root / t, float(dn)
+    else:
+        tf = Fraction.from_float(t)
+        spread, difference = 2 * t * root, float(tf * tf * dn - an)
+    return math.atan2(spread, difference) / math.pi if spread else float(difference < 0)
+
+
+def one_factor_rejection(om: np.ndarray, cv: float) -> float | None:
+    """An exactly rank-one covariance has a deterministic strict rejection decision."""
+    first = float(om[0, 0])
+    if first <= 0 or first * float(om[1, 1]) != float(om[1, 0]) * float(om[1, 0]):
+        return None
+    # Comparing the exact binary products keeps a genuinely positive, tiny variance.
+    an, ad = first.as_integer_ratio()
+    for i in range(1, len(om)):
+        cn, cd = float(om[i, 0]).as_integer_ratio()
+        for j in range(1, i + 1):
+            bn, bd = float(om[i, j]).as_integer_ratio()
+            dn, dd = float(om[j, 0]).as_integer_ratio()
+            if an * bn * cd * dd != cn * dn * ad * bd:
+                return None
+    if not np.array_equal(om, om.T):
+        return None
+    # A deterministic tie can be exactly on the requested threshold.
+    denominator = sum(map(Fraction.from_float, map(float, om.diagonal()[1:])))
+    return float(
+        Fraction.from_float(first) > Fraction.from_float(float(cv)) ** 2 * denominator
+    )
+
+
+def rejection_eigenvalues(om: np.ndarray, cv: float, tolerance: float) -> np.ndarray:
+    """Symmetric spectrum of L' D L for a positive semidefinite covariance L L'."""
+    variances = om.diagonal()
+    if np.min(variances) < -tolerance:
+        raise ValueError("SCPC covariance is not positive semidefinite.")
+    std = np.full(len(om), math.sqrt(max(0.0, float(variances[1:].max()))))
+    std[0] = math.sqrt(max(0.0, float(variances[0])))
+    zero = std == 0
+    divisor = np.where(zero, 1.0, std)
+    corr = (om / divisor[:, None]) / divisor[None, :]
+    corr[zero, :] = 0
+    corr[:, zero] = 0
+    if np.any(np.abs(om[zero]) > tolerance) or not np.isfinite(corr).all():
+        scale = max(0.0, float(variances.max()))
+        if scale == 0:
+            raise ValueError("SCPC covariance is not positive semidefinite.")
+        corr = om / scale
+        std.fill(math.sqrt(scale))
+    try:
+        factor = np.linalg.cholesky(corr)
+    except np.linalg.LinAlgError:
+        values, vectors = np.linalg.eigh(corr)
+        if values[0] < -32 * len(om) * np.finfo(float).eps:
+            # The input tolerance is relative to the original covariance block.
+            scale = max(float(variances.max()), 0.0)
+            if scale == 0:
+                raise ValueError(
+                    "SCPC covariance is not positive semidefinite."
+                ) from None
+            values, vectors = np.linalg.eigh(om / scale)
+            if values[0] < -32 * len(om) * np.finfo(float).eps:
+                raise ValueError(
+                    "SCPC covariance is not positive semidefinite."
+                ) from None
+            std.fill(math.sqrt(scale))
+        keep = values > 0
+        factor = vectors[:, keep] * np.sqrt(values[keep])
+    if cv > 1:
+        std[0] /= cv
+    else:
+        std[1:] *= cv
+    largest = std.max()
+    if largest == 0 or factor.shape[1] == 0:
+        return np.zeros(1)
+    weighted = factor * (std / largest)[:, None]
+    return np.linalg.eigvalsh(
+        np.outer(weighted[0], weighted[0]) - weighted[1:].T @ weighted[1:]
+    )
+
+
 def get_rp(om: MatrixLike, cv: float) -> float:
     """Evaluate the rejection probability for one omega matrix.
 
@@ -559,21 +687,38 @@ def get_rp(om: MatrixLike, cv: float) -> float:
     """
     if not math.isfinite(cv):
         raise ValueError("SCPC critical value must be finite.")
-    if cv <= 0.0:
+    if cv < 0.0:
         return 1.0
-
     om = np.asarray(om, dtype=np.float64)
-    if cv > 1.0:
-        pos = 1.0 / (cv * cv)
-        neg = -1.0
-    else:
-        pos = 1.0
-        neg = -(cv * cv)
-
-    omx = neg * om
-    omx[0, :] = pos * om[0, :]
-
-    evals_raw = np.real(np.linalg.eigvals(omx))
+    if (
+        om.ndim != 2
+        or om.shape[0] != om.shape[1]
+        or len(om) < 2
+        or not np.isfinite(om).all()
+    ):
+        raise ValueError(
+            "SCPC covariance must be finite and square with at least two rows."
+        )
+    tolerance = (
+        32 * len(om) * np.finfo(float).eps * max(0.0, float(om.diagonal().max()))
+    )
+    if np.any(np.abs(om - om.T) > tolerance):
+        raise ValueError("SCPC covariance is not symmetric.")
+    if len(om) > 2:
+        active = np.flatnonzero(om.diagonal()[1:]) + 1
+        if len(active) <= 1:
+            j = active[0] if len(active) else 1
+            omitted = np.arange(len(om))
+            omitted = omitted[(omitted != 0) & (omitted != j)]
+            if not om[omitted, :].any() and not om[:, omitted].any():
+                om = om[np.ix_([0, j], [0, j])]
+    if len(om) == 2:
+        a, b, d = float(om[0, 0]), float(om[0, 1]), float(om[1, 1])
+        return bivariate_rejection(a, b + 0.5 * (float(om[1, 0]) - b), d, cv)
+    atom = one_factor_rejection(om, cv)
+    if atom is not None:
+        return atom
+    evals_raw = rejection_eigenvalues(om, cv, tolerance)
     max_positive = float(np.max(evals_raw)) if evals_raw.size > 0 else 0.0
     if not math.isfinite(max_positive) or max_positive <= 0.0:
         return 0.0

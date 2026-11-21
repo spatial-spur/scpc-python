@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from functools import cache
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from formulaic import ModelSpec
 
 from ..types import (
     ArrayLike,
@@ -89,12 +93,37 @@ def make_pyfixest_demeaner(model: ModelLike):
     return make_fixef_demeaner(fe, len(fe))
 
 
+def _get_pyfixest_formula_context(model: ModelLike) -> dict[str, object]:
+    """Build the formulaic evaluation context including PyFixest transforms."""
+    from pyfixest.estimation.formula.factor_interaction import factor_interaction
+    from pyfixest.estimation.formula.utils import _factorize, log
+
+    context: dict[str, object] = {
+        "log": log,
+        "i": factor_interaction,
+        "__fixed_effect__": _factorize,
+    }
+    user_context = getattr(model, "_context", None)
+    if isinstance(user_context, Mapping):
+        context.update(user_context)
+    return context
+
+
+def _eval_pyfixest_rhs_design(
+    rhs_spec: ModelSpec, data: DataFrameLike, model: ModelLike
+):
+    """Evaluate a PyFixest RHS ModelSpec with a clean encoder state for i() terms."""
+    context = _get_pyfixest_formula_context(model)
+    formula = getattr(rhs_spec, "formula", None)
+    if formula is not None and getattr(model, "_icovars", None) is not None:
+        return formula.get_model_matrix(data, context=context)
+    return rhs_spec.get_model_matrix(data, context=context)
+
+
 def get_pyfixest_raw_ols_design(model: ModelLike, n: int) -> np.ndarray:
     """Recreate the fitted columns before PyFixest's iterative absorption."""
     data = get_pyfixest_data(model)
-    design = model._model_spec.second_stage.rhs.get_model_matrix(
-        data, context=model._context
-    )
+    design = _eval_pyfixest_rhs_design(model._model_spec.second_stage.rhs, data, model)
     if not design.index.equals(data.index):
         raise ValueError("PyFixest OLS design does not line up with the fitted sample.")
     return get_pyfixest_named_columns(
@@ -366,14 +395,36 @@ def get_fixest_iv_design(
     intercept = (
         np.ones((n, 1), dtype=float) if has_intercept else np.empty((n, 0), dtype=float)
     )
+    model_spec = getattr(model, "_model_spec", None)
+    exo_source = data
+    if (
+        exo_no_intercept
+        and any(name not in data.columns for name in exo_no_intercept)
+        and model_spec is not None
+        and hasattr(model_spec, "second_stage")
+    ):
+        exo_design = _eval_pyfixest_rhs_design(model_spec.second_stage.rhs, data, model)
+        if exo_design.index.equals(data.index):
+            exo_source = exo_design
+    inst_source = data
+    if (
+        inst_names
+        and any(name not in data.columns for name in inst_names)
+        and model_spec is not None
+        and hasattr(model_spec, "first_stage")
+    ):
+        inst_design = _eval_pyfixest_rhs_design(model_spec.first_stage.rhs, data, model)
+        if inst_design.index.equals(data.index):
+            inst_source = inst_design
+
     exo = get_pyfixest_named_columns(
-        data,
+        exo_source,
         exo_no_intercept,
         n=n,
         context="PyFixest IV exogenous regressor",
     )
     inst = get_pyfixest_named_columns(
-        data,
+        inst_source,
         inst_names,
         n=n,
         context="PyFixest IV instrument",
@@ -416,6 +467,7 @@ def get_conditional_projection_setup(
     n: int,
     uncond: bool,
     iv_design: FixestSpec | None = None,
+    raw_ols_design: bool = False,
 ) -> ConditionalProjectionSetup:
     """Prepare the regression-side objects for conditional SCPC.
 
@@ -430,6 +482,8 @@ def get_conditional_projection_setup(
         n: Expected number of active observations.
         uncond: Whether unconditional inference was requested.
         iv_design: Previously extracted IV design, if available.
+        raw_ols_design: Whether `model_mat` already contains the active raw
+            PyFixest OLS design before fixed-effect absorption.
 
     Returns:
         The normalized conditional projection setup.
@@ -487,7 +541,7 @@ def get_conditional_projection_setup(
 
         if has_fixest_fe(model):
             demean = make_pyfixest_demeaner(model)
-            raw = get_pyfixest_raw_ols_design(model, n)
+            raw = model_mat if raw_ols_design else get_pyfixest_raw_ols_design(model, n)
             model_mat = demean(
                 raw, context="PyFixest OLS regressor", drop_absorbed=True
             )

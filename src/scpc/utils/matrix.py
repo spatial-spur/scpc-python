@@ -290,38 +290,66 @@ def make_iv_residualizer(
     return residualize
 
 
+def normalize_cluster_direction(
+    xj_indiv: np.ndarray, cl_idx: np.ndarray, nclust: int
+) -> np.ndarray:
+    """Normalize `xj_indiv` within each cluster without square overflow or underflow."""
+    cl_max = np.zeros(nclust, dtype=float)
+    np.maximum.at(cl_max, cl_idx, np.abs(xj_indiv))
+    row_scale = cl_max[cl_idx]
+    xj_scaled = np.divide(
+        xj_indiv,
+        row_scale,
+        out=np.zeros_like(xj_indiv, dtype=float),
+        where=row_scale > 0.0,
+    )
+    xj_sq_sum = np.bincount(cl_idx, weights=xj_scaled**2, minlength=nclust)
+    cl_denom = np.sqrt(xj_sq_sum[cl_idx])
+    xjs_indiv = np.divide(
+        xj_scaled,
+        cl_denom,
+        out=np.zeros_like(xj_scaled),
+        where=cl_denom > 0.0,
+    )
+    xjs_indiv[~np.isfinite(xjs_indiv)] = 0.0
+    return xjs_indiv
+
+
 def validate_conditional_denominator(before: np.ndarray, after: np.ndarray) -> None:
     """Reject conditional spatial bases with no informative denominator direction."""
-    pre_max = float(np.max(np.linalg.norm(before, axis=0)))
-    post = np.linalg.norm(after, axis=0)
-    if (
-        not math.isfinite(pre_max)
-        or pre_max == 0.0
-        or not np.isfinite(post).all()
-        or np.all(post <= 1e-12 * pre_max)
-    ):
+    scale = max(np.max(np.abs(before)), np.max(np.abs(after)))
+    if not np.isfinite(scale) or scale == 0:
+        raise ValueError("Conditional projection collapsed all non-constant W columns.")
+    # A single common scale protects norms and preserves their relative cutoff.
+    pre_max = np.max(np.linalg.norm(before / scale, axis=0))
+    post_max = np.max(np.linalg.norm(after / scale, axis=0))
+    if pre_max == 0 or post_max <= 1e-12 * pre_max:
         raise ValueError("Conditional projection collapsed all non-constant W columns.")
 
 
-def orthogonalize_w_iv(
+def project_conditional_weights(
     wfin: MatrixLike,
     xj: ArrayLike,
     xjs: ArrayLike,
     residualize,
+    *,
+    rescale: bool = False,
 ) -> MatrixLike:
-    """Build the conditional IV projection matrix for non-clustered SCPC.
+    """Build the conditional weights for unclustered OLS or IV SCPC.
 
-    Apply the transposed IV residual maker to the regressor-weighted spatial
+    Apply the fitted residual maker to the regressor-weighted spatial
     directions, then scale by the normalized coefficient influence direction.
 
     Args:
         wfin: Spatial projection matrix.
         xj: Coefficient-specific influence direction.
         xjs: Normalized sign or scaling vector for `xj`.
-        residualize: Residualizer returned by `make_iv_residualizer()`.
+        residualize: OLS residual maker or the transposed IV residual maker.
+        rescale: Remove the common direction scale before projection when only
+            rejection probabilities are needed.
 
     Returns:
-        The orthogonalized conditional IV projection matrix.
+        The orthogonalized conditional projection matrix.
     """
     wfin = np.asarray(wfin, dtype=float)
     xj = np.asarray(xj, dtype=float)
@@ -329,17 +357,19 @@ def orthogonalize_w_iv(
 
     if len(xj) != wfin.shape[0]:
         raise ValueError(
-            "Conditional IV projection received xj with an incompatible length."
+            "Conditional projection received xj with an incompatible length."
         )
     if len(xjs) != wfin.shape[0]:
         raise ValueError(
-            "Conditional IV projection received xjs with an incompatible length."
+            "Conditional projection received xjs with an incompatible length."
         )
     if not np.isfinite(xj).all() or not np.isfinite(xjs).all():
-        raise ValueError(
-            "Conditional IV projection received non-finite xj or xjs values."
-        )
+        raise ValueError("Conditional projection received non-finite xj or xjs values.")
 
+    if rescale:
+        scale = np.max(np.abs(xj))
+        if scale > 0:
+            xj = xj / scale
     wx = wfin.copy()
     wx[:, 0] = wfin[:, 0] * xj * xjs
 
@@ -350,31 +380,35 @@ def orthogonalize_w_iv(
         validate_conditional_denominator(y, wx[:, 1:])
 
     if not np.isfinite(wx).all():
-        raise ValueError("Conditional IV projection produced non-finite W values.")
+        raise ValueError("Conditional projection produced non-finite W values.")
 
     return wx
 
 
-def orthogonalize_w_cluster_iv(
+def project_clustered_weights(
     wfin: MatrixLike,
     cl_vec: ArrayLike,
     xj_indiv: ArrayLike,
     residualize,
+    *,
+    rescale: bool = False,
 ) -> MatrixLike:
-    """Build the conditional IV projection matrix for clustered SCPC.
+    """Build the conditional weights for clustered OLS or IV SCPC.
 
     Normalize individual influence directions within clusters, apply the
-    transposed IV residual maker to regressor-weighted spatial directions,
+    fitted residual maker to regressor-weighted spatial directions,
     and aggregate the resulting weights back to the cluster level.
 
     Args:
         wfin: Cluster-level spatial projection matrix.
         cl_vec: Cluster membership for each individual observation.
         xj_indiv: Individual-level influence direction.
-        residualize: Residualizer returned by `make_iv_residualizer()`.
+        residualize: OLS residual maker or the transposed IV residual maker.
+        rescale: Remove the common direction scale after obtaining the
+            within-cluster normalized weights.
 
     Returns:
-        The cluster-level conditional IV projection matrix.
+        The cluster-level conditional projection matrix.
     """
     wfin = np.asarray(wfin, dtype=float)
     cl_vec = np.asarray(cl_vec)
@@ -389,14 +423,18 @@ def orthogonalize_w_cluster_iv(
 
     if len(xj_indiv) != len(cl_vec):
         raise ValueError(
-            "Clustered IV projection received xj_indiv with an incompatible length."
+            "Clustered conditional projection received xj_indiv with an incompatible length."
         )
     if not np.isfinite(xj_indiv).all():
-        raise ValueError("Clustered IV projection received non-finite xj_indiv values.")
+        raise ValueError(
+            "Clustered conditional projection received non-finite xj_indiv values."
+        )
 
-    xj_sq_sum = np.bincount(cl_idx, weights=xj_indiv**2, minlength=nclust)
-    xjs_indiv = xj_indiv / np.sqrt(xj_sq_sum[cl_idx])
-    xjs_indiv[~np.isfinite(xjs_indiv)] = 0
+    xjs_indiv = normalize_cluster_direction(xj_indiv, cl_idx, nclust)
+    if rescale:
+        scale = np.max(np.abs(xj_indiv))
+        if scale > 0:
+            xj_indiv = xj_indiv / scale
 
     w_indiv = wfin[cl_idx, :]
     wx = np.zeros((nclust, ncol_w), dtype=float)
@@ -420,10 +458,15 @@ def orthogonalize_w_cluster_iv(
 
     if not np.isfinite(wx).all():
         raise ValueError(
-            "Clustered conditional IV projection produced non-finite W values."
+            "Clustered conditional projection produced non-finite W values."
         )
 
     return wx
+
+
+# Existing helper names accept IV residual makers and remain available to callers.
+orthogonalize_w_iv = project_conditional_weights
+orthogonalize_w_cluster_iv = project_clustered_weights
 
 
 def encode_fixef_id(fixef_id: ArrayLike, n: int) -> np.ndarray:
@@ -487,6 +530,13 @@ def encode_fixef_id(fixef_id: ArrayLike, n: int) -> np.ndarray:
     return np.column_stack(encoded_cols)
 
 
+def input_spacing(magnitude: np.ndarray) -> np.ndarray:
+    """Binary64 spacing in the input's binade, including subnormals and DBL_MAX."""
+    _, exponent = np.frexp(magnitude)
+    power = np.where(magnitude == 0, -1074, np.maximum(exponent - 53, -1074))
+    return np.ldexp(1.0, power)
+
+
 def make_fixef_demeaner(fixef_id: ArrayLike, n: int):
     """Build a scale-aware unweighted demeaning callable using PyFixest."""
     from pyfixest.core.demean import demean_within
@@ -516,60 +566,84 @@ def make_fixef_demeaner(fixef_id: ArrayLike, n: int):
         if matrix.shape[1] == 0:
             return matrix.copy()
 
+        if len(anchors) == 1:
+            codes = fe_codes[:, 0]
+            shape = (len(counts[0]), matrix.shape[1])
+            original = np.zeros(shape)
+            np.maximum.at(original, codes, np.abs(matrix))
+            with np.errstate(over="ignore"):
+                candidate = matrix - matrix[anchors[0]]
+            shifted_scale = np.zeros(shape)
+            np.maximum.at(shifted_scale, codes, np.abs(candidate))
+            use_shift = shifted_scale < original
+            scale = np.where(use_shift, shifted_scale, original)
+            scale[scale == 0] = 1.0
+            values = np.where(use_shift[codes], candidate, matrix) / scale[codes]
+            out = values - group_means(values, codes, counts[0])[codes]
+            if drop_absorbed:
+                amplitude = np.zeros(shape)
+                np.maximum.at(amplitude, codes, np.abs(out))
+                drop = 2.0 * amplitude < input_spacing(original) / scale
+                out[drop[codes]] = 0.0
+            return restore_residualizer_shape(out * scale[codes], vector)
+
         # Compare shifts in the absorbed space before scaling. A large group
         # offset can occur in any effect, and in different effects by column.
         shifted = matrix.copy()
-        original = np.max(np.abs(matrix), axis=0)
+        abs_matrix = np.abs(matrix)
+        original = np.max(abs_matrix, axis=0)
         scales = original.copy()
         for anchor in anchors:
             with np.errstate(over="ignore"):
-                candidate = matrix - matrix[anchor]
+                candidate = shifted - shifted[anchor]
             candidate_scales = np.max(np.abs(candidate), axis=0)
             better = candidate_scales < scales
             shifted[:, better] = candidate[:, better]
             scales[better] = candidate_scales[better]
         scales[scales == 0] = 1.0
         shifted /= scales
-        # A difference smaller than one input spacing can be introduced by
-        # rounding the absorbed levels. Retain contrasts at or above it.
-        noise = (original - np.nextafter(original, 0.0)) / scales
-        if len(anchors) == 1:
-            codes = fe_codes[:, 0]
-            out = shifted - group_means(shifted, codes, counts[0])[codes]
-        else:
+        noise = 0.5 * (input_spacing(original) / scales)
 
-            def solve(x: np.ndarray) -> np.ndarray:
-                out, converged = demean_within(
-                    x=x, flist=groups, weights=weights, tol=1e-14, maxiter=10_000
+        def max_group_moment(arr: np.ndarray) -> np.ndarray:
+            moment = np.zeros(arr.shape[1])
+            for codes, sizes in zip(fe_codes.T, counts, strict=True):
+                np.maximum(
+                    moment,
+                    np.max(np.abs(group_means(arr, codes, sizes)), axis=0),
+                    out=moment,
                 )
-                if not converged or not np.isfinite(out).all():
+            return moment
+
+        def solve(x: np.ndarray) -> np.ndarray:
+            out, converged = demean_within(
+                x=x, flist=groups, weights=weights, tol=1e-14, maxiter=10_000
+            )
+            if not np.isfinite(out).all():
+                raise ValueError(f"{context} fixed-effect demeaning did not converge.")
+            if not converged:
+                size = np.maximum(np.max(np.abs(out), axis=0), 1e-15)
+                if np.any(max_group_moment(out) > 1e-11 * size):
                     raise ValueError(
                         f"{context} fixed-effect demeaning did not converge."
                     )
-                return out
+            return out
 
-            out = solve(shifted)
-            # Check the group moments against the achieved within scale.
-            # An absolute solver tolerance can leave substantial leakage
-            # when most of the variation was absorbed.
-            for step in range(7):
-                size = np.max(np.abs(out), axis=0)
-                moment = np.zeros_like(size)
-                for codes, sizes in zip(fe_codes.T, counts, strict=True):
-                    np.maximum(
-                        moment,
-                        np.max(np.abs(group_means(out, codes, sizes)), axis=0),
-                        out=moment,
-                    )
-                refine = (moment > 1e-11 * size) & (size >= noise)
-                if not np.any(refine):
-                    break
-                if step == 6:
-                    raise ValueError(
-                        f"{context} fixed-effect demeaning did not reach the required "
-                        "group-moment tolerance."
-                    )
-                out[:, refine] = solve(out[:, refine] / size[refine]) * size[refine]
+        out = solve(shifted)
+        # Check the group moments against the achieved within scale.
+        # An absolute solver tolerance can leave substantial leakage
+        # when most of the variation was absorbed.
+        for step in range(7):
+            size = np.max(np.abs(out), axis=0)
+            moment = max_group_moment(out)
+            refine = (moment > 1e-11 * size) & (size >= noise)
+            if not np.any(refine):
+                break
+            if step == 6:
+                raise ValueError(
+                    f"{context} fixed-effect demeaning did not reach the required "
+                    "group-moment tolerance."
+                )
+            out[:, refine] = solve(out[:, refine] / size[refine]) * size[refine]
         if drop_absorbed:
             out[:, np.max(np.abs(out), axis=0) < noise] = 0.0
         return restore_residualizer_shape(out * scales, vector)
@@ -688,9 +762,7 @@ def orthogonalize_w_cluster(
         _, cl_idx = np.unique(cl_vec, return_inverse=True)
 
     # Normalize the influence direction for the final cluster aggregation.
-    xj_sq_sum = np.bincount(cl_idx, weights=xj_indiv**2, minlength=nclust)
-    xjs_indiv = xj_indiv / np.sqrt(xj_sq_sum[cl_idx])
-    xjs_indiv[~np.isfinite(xjs_indiv)] = 0
+    xjs_indiv = normalize_cluster_direction(xj_indiv, cl_idx, nclust)
 
     w_indiv = w[cl_idx, :]
     wx = np.zeros((nclust, ncol_w), dtype=float)

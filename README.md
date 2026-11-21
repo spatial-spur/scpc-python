@@ -38,9 +38,16 @@ automatic change. Set `nthreads=1` for single-threaded Rust execution. In
 multiprocessing code that initializes native threads before starting workers,
 use the `spawn` or `forkserver` start method.
 
-The Rust backend in this development branch requires SCPC API 6
-(`spatial-spur-rust` 0.2.3). To test it before the compatible wheel is
-published, build and install it from the matching shared-core checkout.
+With `backend="rust"`, Python aligns the estimation sample, coordinates and
+fitted model inputs. Rust aggregates cluster scores, absorbs one-way fixed
+effects and builds the conditional OLS or IV projection for exact and Nyström
+SCPC. Conditional models with multiple absorbed fixed effects use the Python
+implementation under `backend="auto"`.
+Each observation in the estimation sample needs a cluster label when clustering
+is requested. Coordinates must be identical within each cluster.
+
+This development branch requires SCPC API 7. Install the adapter from the
+matching shared-core checkout.
 
 ```bash
 uv pip install ../spatial-rust/crates/spatial-py
@@ -49,6 +56,9 @@ uv pip install ../spatial-rust/crates/spatial-py
 Approximate SCPC raises `scpc.InvalidSampledCovarianceError` if its sampled
 covariance matrix is asymmetric or materially indefinite. For samples that fit
 in memory, request `method="exact"` to compute the unsampled covariance.
+For a given seed, all conditional coefficients use the same sampled site pairs.
+Reordering regressors or limiting the number of reported coefficients preserves
+the inference for each retained coefficient.
 
 ## Basic Usage
 

@@ -17,6 +17,7 @@ import pandas as pd
 import pyfixest as pf
 import pytest
 import statsmodels.formula.api as smf
+from statsmodels.regression.linear_model import OLS
 
 from scpc import InvalidSampledCovarianceError, scpc
 from scpc.core import load_rust_backend
@@ -104,6 +105,120 @@ def make_small_ols_setup() -> tuple[Any, pd.DataFrame]:
     return model, data
 
 
+@pytest.mark.parametrize("method", ["exact", "approx"])
+def test_native_model_preparation_uses_raw_fit(
+    monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    require_rust()
+    fit, data = make_small_ols_setup()
+    options: dict[str, Any] = {
+        "coords_euclidean": ("coord_x", "coord_y"),
+        "method": method,
+        "cvs": True,
+    }
+    expected = scpc(fit, data, backend="fallback", **options)
+
+    def unexpected_host_preparation(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError(
+            "The native model operation must prepare the fitted design itself."
+        )
+
+    monkeypatch.setattr(
+        "scpc.core.get_conditional_projection_setup", unexpected_host_preparation
+    )
+    actual = scpc(fit, data, backend="rust", **options)
+    assert actual.backend == "rust"
+    npt.assert_allclose(actual.scpcstats, expected.scpcstats, rtol=1e-10, atol=1e-12)
+    assert actual.scpccvs is not None and expected.scpccvs is not None
+    npt.assert_allclose(actual.scpccvs, expected.scpccvs, rtol=1e-10, atol=1e-12)
+
+
+def test_conditional_fit_checks_the_entire_selected_nuisance_design() -> None:
+    data = load_bench_df("bench_200.csv")
+    data["aliased"] = data["x1"] + 1e-12 * data["x2"]
+    fit = smf.ols("y ~ x1 + aliased", data=data).fit()
+    backends = ("fallback", "rust") if rust_available() else ("fallback",)
+    for backend in backends:
+        with pytest.raises(ValueError, match="rank deficient"):
+            scpc(fit, data, coords_euclidean=("s_1", "s_2"), ncoef=1, backend=backend)
+
+
+@pytest.mark.parametrize(
+    "options, error", [({"ncoef": 0}, "ncoef"), ({"avc": math.nan}, "avc")]
+)
+def test_invalid_input_is_rejected_before_backend_selection(
+    options: dict[str, Any], error: str
+) -> None:
+    fit, data = make_small_ols_setup()
+    for backend in ("rust", "auto", "fallback"):
+        with pytest.raises(ValueError, match=error):
+            scpc(
+                fit,
+                data,
+                coords_euclidean=("coord_x", "coord_y"),
+                backend=backend,
+                **options,
+            )
+
+
+def test_native_model_rejects_aggregated_scores_and_invalid_fe_labels() -> None:
+    native = require_rust()
+    coords = np.arange(3.0)[:, None]
+    ids = np.repeat(np.arange(3), 2)
+    coef = np.array([1.0])
+    bread = np.ones((1, 1))
+    with pytest.raises(ValueError, match="one row per model observation"):
+        native.run_model_scpc(coords, coef, bread, coords, 0.1, cluster_id=ids)
+    design = np.ones((6, 1))
+    with pytest.raises(TypeError, match="fe_id must have an integer dtype"):
+        native.run_model_scpc(
+            coords,
+            coef,
+            bread,
+            design,
+            0.1,
+            design=design,
+            cluster_id=ids,
+            fe_id=ids.astype(float),
+        )
+
+
+def test_cluster_coordinates_must_match_each_observation_on_the_fitted_sample() -> None:
+    fit, data = make_small_ols_setup()
+    data["site"] = [0, 0, 0, 1, 1]
+    data["coord_x"] = [0.0, 1.0, -1.0, 2.0, 2.0]
+    for backend in ("fallback", "rust") if rust_available() else ("fallback",):
+        with pytest.raises(ValueError, match="Coordinates vary within clusters"):
+            scpc(
+                fit, data, coords_euclidean=["coord_x"], cluster="site", backend=backend
+            )
+
+
+@pytest.mark.parametrize("missing", [None, np.nan, pd.NA])
+def test_active_cluster_labels_must_be_present(missing: object) -> None:
+    fit, data = make_small_ols_setup()
+    data["site"] = ["a", "a", missing, "b", "b"]
+    with pytest.raises(ValueError, match="Cluster labels must be present"):
+        scpc(
+            fit, data, coords_euclidean=["coord_x"], cluster="site", backend="fallback"
+        )
+
+
+def test_cluster_validation_uses_only_rows_kept_by_the_fit() -> None:
+    data = load_bench_df("bench_200.csv")
+    dropped = data.iloc[[0]].assign(y=np.nan, cluster_id=np.nan, s_1_clustered=np.nan)
+    data = pd.concat([data, dropped], ignore_index=True)
+    fit = smf.ols("y ~ x1 + x2", data=data).fit()
+    result = scpc(
+        fit,
+        data,
+        cluster="cluster_id",
+        coords_euclidean=["s_1_clustered", "s_2_clustered"],
+        backend="fallback",
+    )
+    assert np.isfinite(result.scpcstats).all()
+
+
 def make_direct_ffi_inputs() -> tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
 ]:
@@ -145,7 +260,7 @@ def make_direct_ffi_inputs() -> tuple[
 
 def test_spatial_spur_rust_api_version_fortran_layout_and_validation() -> None:
     rust_mod: Any = require_rust()
-    assert rust_mod.API_VERSION == 6
+    assert rust_mod.API_VERSION == 7
 
     coords, coef, wj, xj, xjs, u = make_direct_ffi_inputs()
 
@@ -1562,6 +1677,33 @@ def test_approx_scpc_bench_200_ols_parity_and_threads(
         npt.assert_allclose(res_1.scpccvs, res_2.scpccvs, rtol=1e-13, atol=1e-13)
 
 
+def test_nystrom_conditional_inference_is_invariant_to_coefficient_order_and_subset() -> (
+    None
+):
+    data = load_bench_df("bench_200.csv").assign(constant=1.0)
+    full = OLS(data.y, data[["constant", "x1", "x2"]]).fit()
+    reordered = OLS(data.y, data[["x2", "constant", "x1"]]).fit()
+    options: dict[str, Any] = dict(
+        coords_euclidean=("s_1", "s_2"),
+        method="approx",
+        cvs=True,
+        nthreads=1,
+        large_n_seed=1,
+    )
+    for backend in ("fallback", "rust") if rust_available() else ("fallback",):
+        original = scpc(full, data, backend=backend, **options)
+        subset = scpc(reordered, data, ncoef=2, backend=backend, **options)
+        assert subset.coef_names == ["x2", "constant"]
+        order = [original.coef_names.index(name) for name in subset.coef_names]
+        assert original.scpccvs is not None and subset.scpccvs is not None
+        npt.assert_allclose(
+            subset.scpccvs, original.scpccvs[order], rtol=1e-10, atol=1e-10
+        )
+        npt.assert_allclose(
+            subset.scpcstats, original.scpcstats[order], rtol=1e-10, atol=1e-10
+        )
+
+
 @pytest.mark.parametrize(
     ("formula", "cluster"),
     [
@@ -1667,7 +1809,7 @@ def test_approx_threshold_override_and_tied_dispatch() -> None:
             method="approx",
             backend="rust",
         )
-    with pytest.raises(InvalidSampledCovarianceError, match="method='exact'"):
+    with pytest.raises(ValueError, match="degenerate principal direction"):
         scpc(
             fit_tie,
             df_tie,

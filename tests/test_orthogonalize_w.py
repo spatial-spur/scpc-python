@@ -34,6 +34,35 @@ def test_absorbed_ols_preserves_representable_variation_near_large_anchor() -> N
     npt.assert_allclose(actual, expected, rtol=0, atol=1e-12)
 
 
+def test_one_way_absorption_preserves_extreme_contrasts_in_each_group() -> None:
+    maximum = np.finfo(float).max
+    previous = np.nextafter(maximum, 0.0)
+    spacing = maximum - previous
+    smallest = np.finfo(float).smallest_subnormal
+    fe = np.tile([0, 1, 2], 3)
+    values = np.array(
+        [
+            maximum,
+            1e-300,
+            smallest,
+            previous,
+            2e-300,
+            2 * smallest,
+            np.nextafter(previous, 0.0),
+            3e-300,
+            3 * smallest,
+        ]
+    )
+    result = make_fixef_demeaner(fe, len(fe))(
+        values, context="one-way fixed effects", drop_absorbed=True
+    )
+    npt.assert_array_equal(result[fe == 0], [spacing, 0, -spacing])
+    npt.assert_allclose(
+        result[fe == 1], [-1e-300, 0, 1e-300], atol=np.spacing(2e-300), rtol=1e-14
+    )
+    npt.assert_array_equal(result[fe == 2], [-smallest, 0, smallest])
+
+
 def test_two_way_absorption_preserves_large_offsets_in_either_effect() -> None:
     fe = np.column_stack((np.repeat(np.arange(4), 5), np.tile(np.arange(5), 4)))
     rng = np.random.default_rng(1143)
@@ -411,3 +440,71 @@ def test_orthogonalize_w_multiway_absorption_detects_collapse() -> None:
             np.empty((n, 0)),
             fixef_id=[list(row) for row in zip(g1, g2)],
         )
+
+
+def test_fixef_demeaner_handles_binary_ulp_single_group_offset_and_balanced_2way() -> (
+    None
+):
+    # 1. Binary 0/1 contrast shifted by 2^52 (1 ULP peak-to-peak, 0.5 ULP demeaned amplitude)
+    fe_bin = np.array([0, 0, 1, 1, 2, 2])
+    x_bin = np.array([0.0, 1.0, 0.0, 1.0, 1.0, 0.0])[:, None]
+    demean_bin = make_fixef_demeaner(fe_bin, len(fe_bin))
+    vals_bin = np.arange(6.0) ** 2
+    exp_bin = make_ols_residualizer(x_bin, demean=demean_bin, require_full_rank=True)(
+        vals_bin
+    )
+    act_bin = make_ols_residualizer(
+        x_bin + 2.0**52, demean=demean_bin, require_full_rank=True
+    )(vals_bin)
+    npt.assert_allclose(act_bin, exp_bin, rtol=0, atol=1e-12)
+
+    # 2. Single-group huge offset (1e15 in group 0, 0.001*z in groups 1..9)
+    rng = np.random.default_rng(42)
+    fe_sg = np.repeat(np.arange(10), 10)
+    z = rng.normal(size=100)
+    x_sg = (0.001 * z * (fe_sg > 0) + 1e15 * (fe_sg == 0))[:, None]
+    x_clean = (0.001 * z * (fe_sg > 0))[:, None]
+    demean_sg = make_fixef_demeaner(fe_sg, len(fe_sg))
+    vals_sg = rng.normal(size=100)
+    exp_sg = make_ols_residualizer(x_clean, demean=demean_sg, require_full_rank=True)(
+        vals_sg
+    )
+    act_sg = make_ols_residualizer(x_sg, demean=demean_sg, require_full_rank=True)(
+        vals_sg
+    )
+    npt.assert_allclose(act_sg, exp_sg, rtol=0, atol=1e-12)
+
+    # 3. Balanced 2-way FE with large offsets in both factors (1e12 * g + 1e6 * h)
+    g = np.repeat(np.arange(5), 5)
+    h = np.tile(np.arange(5), 5)
+    c = ((g - 2) * (h - 2)).astype(float)
+    x_2w = (c + 1e12 * g + 1e6 * h)[:, None]
+    demean_2w = make_fixef_demeaner(np.column_stack([g, h]), 25)
+    res_2w = demean_2w(x_2w, context="test", drop_absorbed=True)
+    npt.assert_allclose(res_2w[:, 0], c, rtol=0, atol=1e-9)
+
+
+def test_cluster_direction_normalization_handles_extreme_scales() -> None:
+    from scpc.utils.matrix import (
+        make_iv_residualizer,
+        orthogonalize_w_cluster,
+        orthogonalize_w_cluster_iv,
+    )
+
+    rng = np.random.default_rng(199)
+    nclust = 6
+    cl_idx = np.repeat(np.arange(nclust), 3)
+    n = len(cl_idx)
+    w, _ = np.linalg.qr(rng.normal(size=(nclust, 3)))
+    x = rng.normal(size=(n, 2))
+    z = rng.normal(size=(n, 2)) + 0.5 * x
+    xj_base = rng.normal(size=n)
+    iv_res = make_iv_residualizer(x, z, transpose=True)
+
+    base_ols = orthogonalize_w_cluster(w, cl_idx, xj_base, x)
+    base_iv = orthogonalize_w_cluster_iv(w, cl_idx, xj_base, iv_res)
+    for scale in (1e200, 1e-200):
+        scaled_ols = orthogonalize_w_cluster(w, cl_idx, xj_base * scale, x)
+        scaled_iv = orthogonalize_w_cluster_iv(w, cl_idx, xj_base * scale, iv_res)
+        npt.assert_allclose(scaled_ols / scale, base_ols, rtol=1e-12, atol=1e-12)
+        npt.assert_allclose(scaled_iv / scale, base_iv, rtol=1e-12, atol=1e-12)

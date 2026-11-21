@@ -5,7 +5,6 @@ import importlib
 import math
 import os
 from typing import Any
-import warnings
 
 import numpy as np
 from statsmodels.regression.linear_model import OLS as SmOLS
@@ -18,40 +17,37 @@ from .utils.data import (
     get_fixest_iv_design,
     get_fixest_score_matrix,
     get_obs_index,
+    get_pyfixest_raw_ols_design,
     get_scpc_model_matrix,
     has_fixest_fe,
     is_fixest_iv_second_stage,
     is_pyfixest_model,
     is_pyfixest_multi,
-    make_pyfixest_demeaner,
     resolve_coords_input,
 )
 from .utils.matrix import (
     iv_projector_factors,
-    orthonormal_design_span,
-    orthogonalize_w,
-    orthogonalize_w_cluster,
-    orthogonalize_w_cluster_iv,
-    orthogonalize_w_iv,
+    make_ols_residualizer,
+    ols_design_span,
+    project_clustered_weights,
+    project_conditional_weights,
 )
 from .utils.spatial import (
     InvalidSampledCovarianceError,
     LARGE_N_CAPM,
-    LARGE_N_CAPN,
-    LARGE_N_M,
     LARGE_N_THRESHOLD,
     get_cv,
     get_oms,
-    lnget_oms,
     max_rp,
-    normalize_s,
+    sample_covariance_pairs,
+    sampled_covariance_grid,
     set_oms_wfin,
     validate_large_n_seed,
     validate_scpc_method,
 )
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
-RUST_API_VERSION = 6
+RUST_API_VERSION = 7
 
 
 def resolve_backend(backend: object) -> str:
@@ -133,7 +129,7 @@ def compute_orthogonal_projector(
         )
     if x_design.shape[1] == 0:
         return None, None
-    proj = orthonormal_design_span(x_design)
+    proj = ols_design_span(x_design, require_full_rank=True)
     if proj.shape[1] == 0:
         return None, None
     proj = np.ascontiguousarray(proj, dtype=np.float64)
@@ -199,8 +195,12 @@ def scpc(
         ValueError: Raised later for invalid combinations of arguments.
     """
 
-    if avc <= 0.001 or avc >= 0.99:
+    if not 0.001 < avc < 0.99:
         raise ValueError("Option avc() must be in (0.001, 0.99).")
+    if ncoef is not None and (
+        isinstance(ncoef, bool) or not isinstance(ncoef, (int, np.integer)) or ncoef < 1
+    ):
+        raise ValueError("`ncoef` must be a positive integer or None.")
     method = validate_scpc_method(method)
     large_n_seed = validate_large_n_seed(large_n_seed)
     resolved_backend = resolve_backend(backend)
@@ -224,7 +224,7 @@ def scpc(
         raise RuntimeError(
             "Rust backend requested (`backend='rust'`), but a compatible "
             f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is unavailable. "
-            "Install spatial-spur-rust >= 0.2.3 or use backend='fallback'."
+            "Build the matching development adapter or use backend='fallback'."
         )
 
     if is_pyfixest_model(model):
@@ -239,34 +239,9 @@ def scpc(
 
     n = s.shape[0]
     p = s.shape[1]
+    if p < 1:
+        raise ValueError("SCPC requires at least one fitted coefficient.")
     neff = n
-
-    iv_design = None
-    model_mat_cond = None
-    cond_include_intercept = False
-    cond_fixef_id = None
-    cond_residualize = None
-    cond_ols_basis = None
-    if not uncond:
-        iv_design = get_fixest_iv_design(model) if model_is_iv else None
-        model_mat = (
-            get_scpc_model_matrix(model)
-            if iv_design is None
-            else iv_design["model_mat"]
-        )
-        cond_setup = get_conditional_projection_setup(
-            model, model_mat, n=n, uncond=False, iv_design=iv_design
-        )
-        model_mat_cond = np.asarray(cond_setup.model_mat, dtype=float)
-        cond_include_intercept = cond_setup.include_intercept
-        cond_fixef_id = cond_setup.fixef_id
-        cond_residualize = cond_setup.residualize
-        cond_ols_basis = cond_setup.ols_basis
-        if model_mat_cond.shape != (n, p):
-            raise ValueError(
-                f"Conditional projection has shape {model_mat_cond.shape}, "
-                f"but the score matrix has shape {(n, p)}."
-            )
 
     obs_index = get_obs_index(model, data)
     coord_info = resolve_coords_input(data, obs_index, lon, lat, coords_euclidean)
@@ -274,37 +249,27 @@ def scpc(
     latlong = coord_info.latlong
 
     cl_idx: np.ndarray | None = None
-    cl_levels: np.ndarray | None = None
-    cl_values: np.ndarray | None = None
     if cluster is not None:
         if not isinstance(cluster, str) or not cluster:
             raise ValueError("`cluster` must be a single column name.")
         if cluster not in data.columns:
             raise ValueError(f"Cluster variable not found in data: {cluster}")
-        cl_values = np.asarray(data.iloc[np.asarray(obs_index, dtype=int) - 1][cluster])
-        cl_levels, cl_idx = np.unique(cl_values, return_inverse=True)
-
-        coord_by_cl = np.zeros((cl_idx.max() + 1, coords.shape[1]), dtype=float)
-        np.add.at(coord_by_cl, cl_idx, coords)
-        n_per_cl = np.bincount(cl_idx)
-        coord_means = coord_by_cl / n_per_cl[:, None]
-        first_index = np.array(
-            [np.flatnonzero(cl_idx == g)[0] for g in range(len(n_per_cl))]
+        cl_values = data.iloc[np.asarray(obs_index, dtype=int) - 1][cluster]
+        if cl_values.isna().any():
+            raise ValueError("Cluster labels must be present in the estimation sample.")
+        _, first_index, cl_idx = np.unique(
+            cl_values, return_index=True, return_inverse=True
         )
+
         coord_first = coords[first_index, :]
-        if np.max(np.abs(coord_means - coord_first)) > 1e-8:
-            warnings.warn(
-                "Coordinates vary within clusters. The first observation's "
-                "coordinates are used for each cluster; consider averaging "
-                "coordinates within clusters before calling scpc().",
-                stacklevel=2,
+        if not np.array_equal(coords, coord_first[cl_idx]):
+            raise ValueError(
+                "Coordinates vary within clusters. Supply one coordinate per cluster "
+                "for all observations in the estimation sample."
             )
 
-        s_cluster = np.zeros((len(n_per_cl), s.shape[1]), dtype=float)
-        np.add.at(s_cluster, cl_idx, s)
-        s = s_cluster
         coords = coord_first
-        neff = s.shape[0]
+        neff = len(coord_first)
 
     if coords.shape[1] == 1:
         coords = np.column_stack((coords, np.zeros(coords.shape[0])))
@@ -337,173 +302,57 @@ def scpc(
         if (method == "approx" or (method == "auto" and neff >= LARGE_N_THRESHOLD))
         else "exact"
     )
-    is_rust_eligible = (
-        method_actual in {"exact", "approx"} and not fe_multiway and k_use >= 1
-    )
+    coef_use = np.ascontiguousarray(coef[:k_use], dtype=np.float64)
+    iv_design = get_fixest_iv_design(model) if model_is_iv and not uncond else None
+    design = None
+    if not uncond:
+        if iv_design is not None:
+            design = iv_design["X"]
+        elif model_has_fe:
+            design = get_pyfixest_raw_ols_design(model, n)
+        else:
+            design = get_scpc_model_matrix(model)
 
     fallback_reason = None
     if resolved_backend != "fallback":
         if rust_mod is None:
             fallback_reason = "missing_or_incompatible_native_extension"
-        elif not is_rust_eligible:
-            fallback_reason = (
-                "multiway_fixed_effects" if fe_multiway else "non_positive_ncoef"
-            )
+        elif fe_multiway:
+            fallback_reason = "multiway_fixed_effects"
             if resolved_backend == "rust":
-                detail = (
-                    "multi-way absorbed fixed-effect demeaning"
-                    if fe_multiway
-                    else "non-positive ncoef"
-                )
                 raise NotImplementedError(
-                    f"Rust backend does not support {detail} yet."
+                    "Rust backend does not support multi-way absorbed fixed-effect demeaning yet."
                 )
 
-        if rust_mod is not None and is_rust_eligible:
-            coef_use = np.ascontiguousarray(coef[:k_use], dtype=np.float64)
-            wj_mat = np.ascontiguousarray(
-                neff * (s @ bread_inv[:k_use, :].T) + coef_use[None, :],
-                dtype=np.float64,
-            )
-            if model_mat_cond is None:
-                rust_xj = None
-                rust_xjs = None
-                proj_u = None
-                proj_v = None
-                cl_arg = None
-                fe_arg = None
-            else:
-                xj_mat = np.ascontiguousarray(
-                    neff * (model_mat_cond @ bread_inv[:k_use, :].T),
-                    dtype=np.float64,
-                )
-                if cluster is not None:
-                    if cl_idx is None:
-                        raise ValueError(
-                            "Internal error: clustered SCPC is missing cluster indices."
-                        )
-                    xj_sq_sum = np.zeros((neff, k_use), dtype=np.float64)
-                    np.add.at(xj_sq_sum, cl_idx, xj_mat**2)
-                    cl_denom = np.sqrt(xj_sq_sum[cl_idx, :])
-                    xjs_mat = np.ascontiguousarray(
-                        np.divide(
-                            xj_mat,
-                            cl_denom,
-                            out=np.zeros_like(xj_mat),
-                            where=cl_denom > 0.0,
-                        ),
-                        dtype=np.float64,
-                    )
-                    cl_arg = np.ascontiguousarray(cl_idx, dtype=np.int64)
-                else:
-                    xjs_mat = np.where(xj_mat < 0.0, -1.0, 1.0)
-                    cl_arg = None
-
-                if iv_design is not None:
-                    demean = make_pyfixest_demeaner(model) if model_has_fe else None
-                    fe_arg = fe_id_0based
-                    proj_v, proj_u = compute_iv_projector(
-                        iv_design["X"], iv_design["Z"], demean=demean
-                    )
-                    rust_xj = xj_mat
-                    rust_xjs = xjs_mat
-                else:
-                    fe_arg = fe_id_0based
-                    if cond_ols_basis is not None:
-                        proj_u = proj_v = np.ascontiguousarray(cond_ols_basis)
-                    else:
-                        proj_u, proj_v = compute_orthogonal_projector(
-                            model_mat_cond,
-                            include_intercept=cond_include_intercept,
-                        )
-                    rust_xj = xj_mat
-                    rust_xjs = xjs_mat
-
-            if method_actual == "approx":
-                coords_norm, perm = normalize_s(coords, latlong)
-                perm_idx = np.asarray(perm, dtype=np.int64)
-                coords_mat = np.ascontiguousarray(coords_norm, dtype=np.float64)
-                wj_mat = np.ascontiguousarray(wj_mat[perm_idx, :], dtype=np.float64)
-                if not uncond:
-                    if cluster is not None and cl_arg is not None:
-                        inv_perm = np.empty(len(perm_idx), dtype=np.int64)
-                        inv_perm[perm_idx] = np.arange(len(perm_idx), dtype=np.int64)
-                        cl_arg = np.ascontiguousarray(inv_perm[cl_arg], dtype=np.int64)
-                    else:
-                        rust_xj = (
-                            None
-                            if rust_xj is None
-                            else np.ascontiguousarray(
-                                rust_xj[perm_idx, :], dtype=np.float64
-                            )
-                        )
-                        rust_xjs = (
-                            None
-                            if rust_xjs is None
-                            else np.ascontiguousarray(
-                                rust_xjs[perm_idx, :], dtype=np.float64
-                            )
-                        )
-                        if proj_u is not None:
-                            proj_u = np.ascontiguousarray(
-                                proj_u[perm_idx, :], dtype=np.float64
-                            )
-                        if proj_v is not None:
-                            proj_v = np.ascontiguousarray(
-                                proj_v[perm_idx, :], dtype=np.float64
-                            )
-                        if fe_arg is not None:
-                            fe_arg = np.ascontiguousarray(
-                                fe_arg[perm_idx], dtype=np.int64
-                            )
-                try:
-                    rust_res = rust_mod.run_approx_scpc(
-                        coords_mat,
-                        coef_use,
-                        wj_mat,
-                        float(avc),
-                        latlong=bool(latlong),
-                        uncond=bool(uncond),
-                        cvs=bool(cvs),
-                        xj=rust_xj,
-                        xjs=rust_xjs,
-                        proj_u=proj_u,
-                        proj_v=proj_v,
-                        nthreads=resolved_nthreads,
-                        cluster_id=cl_arg,
-                        fe_id=fe_arg,
-                        seed=int(large_n_seed),
-                        landmarks=LARGE_N_M,
-                        samples=LARGE_N_CAPN,
-                        pair_count=LARGE_N_CAPM,
-                    )
-                except rust_mod.InvalidSampledCovarianceError as error:
-                    raise InvalidSampledCovarianceError(
-                        f"{error}. Try method='exact'."
-                    ) from error
-                except rust_mod.TiedEigenspaceError:
-                    if resolved_backend != "auto":
-                        raise
-                    rust_res = None
-                    fallback_reason = "tied_eigenspace"
-            else:
-                coords_mat = np.ascontiguousarray(coords, dtype=np.float64)
-                rust_res = rust_mod.run_exact_scpc(
-                    coords_mat,
+        if rust_mod is not None and not fe_multiway:
+            try:
+                rust_res = rust_mod.run_model_scpc(
+                    coords,
                     coef_use,
-                    wj_mat,
+                    bread_inv[:k_use],
+                    s,
                     float(avc),
+                    design=design,
+                    instruments=None if iv_design is None else iv_design["Z"],
+                    direction_design=None
+                    if iv_design is None
+                    else iv_design["model_mat"],
+                    cluster_id=cl_idx,
+                    fe_id=fe_id_0based,
                     latlong=bool(latlong),
-                    uncond=bool(uncond),
                     cvs=bool(cvs),
-                    xj=rust_xj,
-                    xjs=rust_xjs,
-                    proj_u=proj_u,
-                    proj_v=proj_v,
                     nthreads=resolved_nthreads,
-                    cluster_id=cl_arg,
-                    fe_id=fe_arg,
+                    seed=int(large_n_seed) if method_actual == "approx" else None,
                 )
+            except rust_mod.InvalidSampledCovarianceError as error:
+                raise InvalidSampledCovarianceError(
+                    f"{error}. Try method='exact'."
+                ) from error
+            except rust_mod.TiedEigenspaceError:
+                if resolved_backend != "auto":
+                    raise
+                rust_res = None
+                fallback_reason = "tied_eigenspace"
 
             if rust_res is not None and not (
                 rust_res["tied"] and resolved_backend == "auto"
@@ -527,6 +376,36 @@ def scpc(
             if rust_res is not None and rust_res["tied"]:
                 fallback_reason = "tied_eigenspace"
 
+    if cl_idx is not None:
+        s_cluster = np.zeros((neff, s.shape[1]), dtype=float)
+        np.add.at(s_cluster, cl_idx, s)
+        s = s_cluster
+    wj_mat = neff * (s @ bread_inv[:k_use].T) + coef_use
+    cond_residualize = None
+    xj_mat = None
+    if design is not None:
+        direction_design = iv_design["model_mat"] if iv_design is not None else design
+        cond_setup = get_conditional_projection_setup(
+            model,
+            direction_design,
+            n=n,
+            uncond=False,
+            iv_design=iv_design,
+            raw_ols_design=model_has_fe and iv_design is None,
+        )
+        model_mat_cond = np.asarray(cond_setup.model_mat, dtype=float)
+        if model_mat_cond.shape != (n, p):
+            raise ValueError(
+                f"Conditional projection has shape {model_mat_cond.shape}, "
+                f"but the score matrix has shape {(n, p)}."
+            )
+        cond_residualize = cond_setup.residualize
+        if cond_residualize is None:
+            cond_residualize = make_ols_residualizer(
+                model_mat_cond, require_full_rank=True
+            )
+        xj_mat = neff * (model_mat_cond @ bread_inv[:k_use].T)
+
     spc = set_oms_wfin(
         coords,
         avc,
@@ -545,30 +424,29 @@ def scpc(
     omsfin = spc.omsfin
     perm = np.asarray(spc.perm, dtype=int)
     q = wfin.shape[1] - 1
-    large_n_random_state = spc.random_state
+    conditional_pairs = None
+    if spc.large_n and xj_mat is not None:
+        assert spc.random_state is not None
+        conditional_pairs, _ = sample_covariance_pairs(
+            spc.coords, LARGE_N_CAPM, spc.random_state, latlong
+        )
 
-    cond_residualize_use = cond_residualize
-    cond_fixef_id_use = cond_fixef_id
-    if (
-        not uncond
-        and cluster is None
-        and not np.array_equal(perm, np.arange(len(perm), dtype=int))
-    ):
-        inv_perm = np.empty(len(perm), dtype=int)
-        inv_perm[perm] = np.arange(len(perm), dtype=int)
-        if cond_residualize is not None:
+    # Nyström reorders sites. Keep observation-space factors in the fitted order.
+    cl_idx_scpc = cl_idx
+    site_order = np.arange(len(perm))
+    if cond_residualize is not None and not np.array_equal(perm, site_order):
+        inv_perm = np.empty_like(perm)
+        inv_perm[perm] = site_order
+        if cl_idx is not None:
+            cl_idx_scpc = inv_perm[cl_idx]
+        else:
             base_resid = cond_residualize
 
             def _permuted_resid(mat: MatrixLike) -> np.ndarray:
                 arr = np.asarray(mat, dtype=float)
-                return np.asarray(base_resid(arr[inv_perm, ...]), dtype=float)[
-                    perm, ...
-                ]
+                return np.asarray(base_resid(arr[inv_perm]), dtype=float)[perm]
 
-            cond_residualize_use = _permuted_resid
-        if cond_fixef_id is not None:
-            fe_arr = np.asarray(cond_fixef_id)
-            cond_fixef_id_use = fe_arr[perm, ...] if fe_arr.ndim > 1 else fe_arr[perm]
+            cond_residualize = _permuted_resid
 
     out = np.full((k_use, 6), np.nan)
     levs = np.array([0.32, 0.10, 0.05, 0.01], dtype=float)
@@ -580,11 +458,15 @@ def scpc(
     )
 
     for j in range(k_use):
-        wj = neff * (bread_inv[j, :] @ s.T) + coef[j]
+        wj = wj_mat[:, j]
         wj_perm = wj[perm]
 
-        wj_norm = float(np.linalg.norm(wj_perm))
-        denom = math.sqrt(float(np.sum((wfin[:, 1:].T @ wj_perm) ** 2)))
+        scale = float(np.max(np.abs(wj_perm)))
+        if not math.isfinite(scale) or scale == 0:
+            raise ValueError("SCPC variance projection is degenerate.")
+        scaled_wj = wj_perm / scale
+        wj_norm = float(np.linalg.norm(scaled_wj))
+        denom = float(np.linalg.norm(wfin[:, 1:].T @ scaled_wj))
         if (
             not math.isfinite(denom)
             or not math.isfinite(wj_norm)
@@ -592,79 +474,36 @@ def scpc(
             or denom <= 1e-12 * wj_norm
         ):
             raise ValueError("SCPC variance projection is degenerate.")
-        tau_u = math.sqrt(q) * float(np.dot(wfin[:, 0], wj_perm)) / denom
-        se = denom / (math.sqrt(q) * math.sqrt(neff))
+        tau_u = math.sqrt(q) * float(np.dot(wfin[:, 0], scaled_wj)) / denom
+        se = (denom / (math.sqrt(q) * math.sqrt(neff))) * scale
         p_u = max_rp(omsfin, q, abs(tau_u) / math.sqrt(q))[0]
 
-        if model_mat_cond is not None:
-            if cluster is not None and cl_idx is not None:
-                if cl_values is None or cl_levels is None:
-                    raise ValueError(
-                        "Internal error: clustered SCPC is missing cluster labels."
-                    )
-
-                cl_idx_scpc = cl_idx
-                if spc.large_n and not np.array_equal(
-                    perm, np.arange(len(perm), dtype=int)
-                ):
-                    # the sampled large-n branch reorders clusters before building w.
-                    level_to_code = {
-                        level: i for i, level in enumerate(cl_levels[perm])
-                    }
-                    cl_idx_scpc = np.array(
-                        [level_to_code[value] for value in cl_values], dtype=int
-                    )
-
-                xj_indiv = neff * (bread_inv[j, :] @ model_mat_cond.T)
-                if cond_residualize is not None:
-                    wx = orthogonalize_w_cluster_iv(
-                        wfin,
-                        cl_idx_scpc,
-                        xj_indiv,
-                        residualize=cond_residualize,
-                    )
-                else:
-                    wx = orthogonalize_w_cluster(
-                        wfin,
-                        cl_idx_scpc,
-                        xj_indiv,
-                        model_mat_cond,
-                        include_intercept=cond_include_intercept,
-                    )
+        if xj_mat is not None and cond_residualize is not None:
+            if cl_idx_scpc is not None:
+                wx = project_clustered_weights(
+                    wfin,
+                    cl_idx_scpc,
+                    xj_mat[:, j],
+                    residualize=cond_residualize,
+                    rescale=True,
+                )
             else:
-                xj = neff * (bread_inv[j, :] @ model_mat_cond.T)
-                xj = xj[perm]
+                xj = xj_mat[perm, j]
                 xjs = np.where(xj < 0.0, -1.0, 1.0)
-                if cond_residualize_use is not None:
-                    wx = orthogonalize_w_iv(
-                        wfin,
-                        xj,
-                        xjs,
-                        residualize=cond_residualize_use,
-                    )
-                else:
-                    wx = orthogonalize_w(
-                        wfin,
-                        xj,
-                        xjs,
-                        model_mat_cond[perm, :],
-                        include_intercept=cond_include_intercept,
-                        fixef_id=cond_fixef_id_use,
-                    )
+                wx = project_conditional_weights(
+                    wfin,
+                    xj,
+                    xjs,
+                    residualize=cond_residualize,
+                    rescale=True,
+                )
 
-            if spc.large_n:
-                # this reuses the sampled omega construction from the large-n setup.
-                omsx, large_n_random_state = lnget_oms(
-                    spc.coords,
-                    spc.c0,
-                    spc.cmax,
-                    wx,
-                    1.2,
-                    capM=LARGE_N_CAPM,
-                    random_t=large_n_random_state
-                    if large_n_random_state is not None
-                    else 1,
-                    latlong=latlong,
+            # A common positive scale leaves all conditional rejection probabilities
+            # unchanged and keeps the covariance products in floating-point range.
+            wx /= np.max(np.abs(wx))
+            if conditional_pairs is not None:
+                omsx = sampled_covariance_grid(
+                    wx, spc.c0, spc.cmax, 1.2, conditional_pairs
                 )
             else:
                 if d is None:

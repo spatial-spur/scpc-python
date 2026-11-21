@@ -12,6 +12,7 @@ from scpc.utils.matrix import (
     make_iv_residualizer,
     orthogonalize_w_iv,
     orthogonalize_w_cluster_iv,
+    project_clustered_weights,
 )
 
 
@@ -22,6 +23,20 @@ RUST_PARAMETER = pytest.param(
         not RUST_AVAILABLE, reason="compatible native extension unavailable"
     ),
 )
+
+
+def test_cluster_direction_rescaling_preserves_a_tiny_clusters_signs():
+    w = np.array([[1.0, 1.0], [1.0, -1.0]]) / np.sqrt(2)
+    ids = np.repeat([0, 1], 2)
+    xj = np.array([1e308, -1e308, 1e-300, -1e-300])
+    v = np.array([1.0, 0.0, 1.0, 0.0]) / np.sqrt(2)
+    projector = np.eye(4) - np.outer(v, v)
+    result = project_clustered_weights(
+        w, ids, xj, lambda a: projector @ a, rescale=True
+    )
+    # The nuisance projection transfers a nonzero component to the tiny group.
+    # Its within-cluster direction still has magnitude 1/sqrt(2) there.
+    np.testing.assert_allclose(result, [[1.0, 0.75], [0.0, -0.25]], atol=1e-15)
 
 
 @pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
@@ -225,3 +240,39 @@ def test_identity_iv_null_rejection_by_quasi_monte_carlo():
     t = np.sqrt(3) * abs(draws[:, 0]) / np.linalg.norm(draws[:, 1:], axis=1)
     assert np.mean(t > 17.62678224) == pytest.approx(0.05, abs=0.0004)
     assert np.mean(t > 14.50861818) == pytest.approx(0.07143375445, abs=0.0004)
+
+
+def test_pyfixest_transforms_and_categorical_fe_parity() -> None:
+    rng = np.random.default_rng(20261121)
+    n = 60
+    df = pd.DataFrame(
+        {
+            "fe": np.repeat(np.arange(10), 6),
+            "cat": np.tile([0, 1, 2], 20),
+            "x": np.exp(rng.normal(size=n)),
+            "sx": rng.uniform(size=n),
+            "sy": rng.uniform(size=n),
+        }
+    )
+    df["y"] = (
+        0.5 * (df["cat"] == 1)
+        - 0.3 * (df["cat"] == 2)
+        + 0.4 * np.log(df["x"])
+        + np.sin(df["fe"])
+        + rng.normal(size=n)
+    )
+    kw: dict[str, Any] = dict(coords_euclidean=["sx", "sy"], cvs=True, nthreads=1)
+    for fml in (
+        "y ~ i(cat) | fe",
+        "y ~ i(cat, x) | fe",
+        "y ~ log(x) | fe",
+        "y ~ C(cat) | fe",
+    ):
+        fit = pf.feols(fml, df)
+        fb = scpc(fit, df, backend="fallback", **kw)
+        assert np.isfinite(fb.scpcstats).all()
+        if RUST_AVAILABLE:
+            rs = scpc(fit, df, backend="rust", **kw)
+            np.testing.assert_allclose(rs.scpcstats, fb.scpcstats, rtol=1e-7, atol=1e-7)
+            assert rs.scpccvs is not None and fb.scpccvs is not None
+            np.testing.assert_allclose(rs.scpccvs, fb.scpccvs, rtol=1e-7, atol=1e-7)

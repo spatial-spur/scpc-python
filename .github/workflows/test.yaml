@@ -2,77 +2,76 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, rust-core]
   pull_request:
-    branches: [main]
+    branches: [main, rust-core]
   workflow_dispatch:
     inputs:
       spatial_rust_ref:
-        description: Shared Rust commit or branch for the native test job
-        required: false
+        description: Matching spatial-rust branch, tag, or commit
         type: string
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
-    test:
-      strategy:
-        fail-fast: false
-        matrix:
-          os: [ubuntu-latest, macos-latest, windows-latest]
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        backend: [fallback, rust]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: package
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: package
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        if: matrix.backend == 'rust'
+        with:
+          repository: spatial-spur/spatial-rust
+          ref: ${{ inputs.spatial_rust_ref || vars.SPATIAL_RUST_REF || 'rust-core' }}
+          path: spatial-rust
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11'
+          enable-cache: true
+          cache-dependency-glob: package/uv.lock
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+      - name: Install locked dependencies and build frontend wheels
+        run: |
+          uv sync --locked --group dev --no-install-project
+          uv build --wheel --out-dir ../wheels
+      - name: Build the native wheel
+        if: matrix.backend == 'rust'
+        env:
+          MATURIN_PEP517_ARGS: --locked
+        run: uv build ../spatial-rust/crates/spatial-py --wheel --out-dir ../wheels
+      - name: Install and check the built wheels
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          uv pip install --reinstall --no-deps ../wheels/*.whl
+          uv run --no-sync python - <<'PYTHON'
+          import os
+          import sysconfig
+          from pathlib import Path
+          from importlib import import_module
 
-      runs-on: ${{ matrix.os }}
-      env:
-        GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
-
-      steps:
-        - name: checkout code
-          uses: actions/checkout@v6
-
-        - name: Install uv and Python
-          uses: astral-sh/setup-uv@v8.0.0
-          with:
-            python-version: "3.11"
-            enable-cache: true
-
-        - name: Install R
-          uses: r-lib/actions/setup-r@v2
-          with:
-            r-version: "release"
-
-        - name: Install dependencies
-          run: uv sync --locked --group dev
-
-        - name: Run tests
-          run: uv run -m pytest
-
-    native:
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.spatial_rust_ref != '' }}
-      strategy:
-        fail-fast: false
-        matrix:
-          os: [ubuntu-latest, macos-latest, windows-latest]
-      runs-on: ${{ matrix.os }}
-      steps:
-        - uses: actions/checkout@v6
-        - uses: actions/checkout@v6
-          with:
-            repository: spatial-spur/spatial-rust
-            ref: ${{ inputs.spatial_rust_ref }}
-            path: native-core
-            persist-credentials: false
-        - uses: astral-sh/setup-uv@v8.0.0
-          with:
-            python-version: '3.11'
-        - name: Install R
-          uses: r-lib/actions/setup-r@v2
-          with:
-            r-version: "release"
-        - name: Install dependencies and build the native extension
-          run: |
-            rustup toolchain install stable --profile minimal
-            uv sync --locked --group dev
-            uv pip install ./native-core/crates/spatial-py
-        - name: Require the compatible native extension
-          run: uv run --no-sync python -c 'from scpc.core import load_rust_backend; assert load_rust_backend() is not None'
-        - name: Test native execution and fallback parity
-          run: uv run --no-sync -m pytest
+          for name in ("scpc",):
+              package = import_module(name)
+              assert Path(package.__file__).is_relative_to(Path(sysconfig.get_path("purelib")))
+              core = import_module(name + ".core")
+              assert (core.load_rust_backend() is not None) == (os.environ["BACKEND"] == "rust")
+          PYTHON
+      - name: Run the installed package tests
+        run: uv run --no-sync python -m pytest
