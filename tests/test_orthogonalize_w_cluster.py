@@ -9,7 +9,7 @@ import pytest
 import statsmodels.formula.api as smf
 
 from scpc import scpc
-from scpc.utils.matrix import orthogonalize_w_cluster
+from scpc.utils.matrix import make_ols_residualizer, project_clustered_weights
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
 
@@ -54,12 +54,11 @@ def test_orthogonalize_w_cluster_leaves_the_simple_cluster_basis_unchanged() -> 
     model_mat_indiv = np.array([[1.0], [1.0]])
 
     npt.assert_allclose(
-        orthogonalize_w_cluster(
+        project_clustered_weights(
             w,
             cl_vec,
             xj_indiv,
-            model_mat_indiv,
-            include_intercept=False,
+            make_ols_residualizer(model_mat_indiv),
         ),
         w,
         atol=1e-12,
@@ -80,26 +79,24 @@ def test_orthogonalize_w_cluster_accepts_preencoded_cluster_indices() -> None:
     xj_indiv = np.array([1.0, 2.0, 1.5, 0.5])
     model_mat_indiv = np.array([[1.0], [0.0], [1.0], [0.0]])
 
-    from_labels = orthogonalize_w_cluster(
+    from_labels = project_clustered_weights(
         w,
         cl_labels,
         xj_indiv,
-        model_mat_indiv,
-        include_intercept=False,
+        make_ols_residualizer(model_mat_indiv),
     )
-    from_idx = orthogonalize_w_cluster(
+    from_idx = project_clustered_weights(
         w,
         cl_idx,
         xj_indiv,
-        model_mat_indiv,
-        include_intercept=False,
+        make_ols_residualizer(model_mat_indiv),
     )
 
     npt.assert_allclose(from_idx, from_labels, atol=1e-12, rtol=0.0)
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
-def test_python_r_parity_orthogonalize_w_cluster() -> None:
+def test_python_r_parity_project_clustered_weights() -> None:
     w = [
         [1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0)],
         [1.0 / math.sqrt(2.0), -1.0 / math.sqrt(2.0)],
@@ -129,12 +126,11 @@ def test_python_r_parity_orthogonalize_w_cluster() -> None:
             "model_mat_indiv": model_mat_indiv,
         },
     )
-    py_value = orthogonalize_w_cluster(
+    py_value = project_clustered_weights(
         np.array(w),
         np.array(cl_vec),
         np.array(xj_indiv),
-        np.array(model_mat_indiv),
-        include_intercept=False,
+        make_ols_residualizer(np.array(model_mat_indiv)),
     )
 
     npt.assert_allclose(py_value, np.array(r_value), atol=ATOL, rtol=RTOL)

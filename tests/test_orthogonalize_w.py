@@ -10,7 +10,9 @@ import pytest
 from scpc.utils.matrix import (
     make_fixef_demeaner,
     make_ols_residualizer,
-    orthogonalize_w,
+    make_iv_residualizer,
+    project_clustered_weights,
+    project_conditional_weights,
 )
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
@@ -131,7 +133,7 @@ def test_orthogonalize_w_leaves_an_already_orthogonal_basis_unchanged() -> None:
     model_mat = np.array([[1.0], [1.0]])
 
     npt.assert_allclose(
-        orthogonalize_w(w, xj, xjs, model_mat, include_intercept=False),
+        project_conditional_weights(w, xj, xjs, make_ols_residualizer(model_mat)),
         w,
         atol=1e-12,
         rtol=0.0,
@@ -149,25 +151,19 @@ def test_orthogonalize_w_one_way_fixef_matches_explicit_dummies() -> None:
     xjs = np.sign(xj)
     model_mat = rng.normal(size=(n, 2)) + 0.5 * fe[:, None]
 
-    expected = orthogonalize_w(
+    expected = project_conditional_weights(
         w,
         xj,
         xjs,
-        np.column_stack((model_mat, _dummy_matrix(fe))),
-        include_intercept=False,
+        make_ols_residualizer(np.column_stack((model_mat, _dummy_matrix(fe)))),
     )
 
-    for include_intercept in (False, True):
-        for fe_arg in (fe, fe_labels, pd.DataFrame({"fe": fe})):
-            actual = orthogonalize_w(
-                w,
-                xj,
-                xjs,
-                model_mat,
-                include_intercept=include_intercept,
-                fixef_id=fe_arg,
-            )
-            npt.assert_allclose(actual, expected, atol=1e-12, rtol=0.0)
+    for fe_arg in (fe, fe_labels, pd.DataFrame({"fe": fe})):
+        residualize = make_ols_residualizer(
+            model_mat, demean=make_fixef_demeaner(fe_arg, n), require_full_rank=True
+        )
+        actual = project_conditional_weights(w, xj, xjs, residualize)
+        npt.assert_allclose(actual, expected, atol=1e-12, rtol=0.0)
 
 
 def test_orthogonalize_w_two_way_fixef_matches_explicit_dummies() -> None:
@@ -181,12 +177,11 @@ def test_orthogonalize_w_two_way_fixef_matches_explicit_dummies() -> None:
     model_mat = rng.normal(size=(n, 2)) + 0.3 * fe1[:, None] - 0.2 * fe2[:, None]
 
     dummies = np.column_stack((_dummy_matrix(fe1), _dummy_matrix(fe2, drop_first=True)))
-    expected = orthogonalize_w(
+    expected = project_conditional_weights(
         w,
         xj,
         xjs,
-        np.column_stack((model_mat, dummies)),
-        include_intercept=False,
+        make_ols_residualizer(np.column_stack((model_mat, dummies))),
     )
 
     for fe_arg in (
@@ -194,14 +189,10 @@ def test_orthogonalize_w_two_way_fixef_matches_explicit_dummies() -> None:
         pd.DataFrame({"fe1": fe1, "fe2": fe2}),
         {"fe1": fe1, "fe2": fe2},
     ):
-        actual = orthogonalize_w(
-            w,
-            xj,
-            xjs,
-            model_mat,
-            include_intercept=True,
-            fixef_id=fe_arg,
+        residualize = make_ols_residualizer(
+            model_mat, demean=make_fixef_demeaner(fe_arg, n), require_full_rank=True
         )
+        actual = project_conditional_weights(w, xj, xjs, residualize)
         npt.assert_allclose(actual, expected, atol=1e-10, rtol=0.0)
 
 
@@ -213,51 +204,42 @@ def test_orthogonalize_w_fixef_empty_model_mat_matches_explicit_dummies() -> Non
     xj = rng.normal(size=n)
     xjs = np.sign(xj)
 
-    expected = orthogonalize_w(
+    expected = project_conditional_weights(
         w,
         xj,
         xjs,
-        _dummy_matrix(fe),
-        include_intercept=False,
+        make_ols_residualizer(_dummy_matrix(fe)),
     )
-    actual = orthogonalize_w(
+    actual = project_conditional_weights(
         w,
         xj,
         xjs,
-        np.empty((n, 0)),
-        include_intercept=True,
-        fixef_id=fe,
+        make_ols_residualizer(np.empty((n, 0)), demean=make_fixef_demeaner(fe, n)),
     )
     npt.assert_allclose(actual, expected, atol=1e-12, rtol=0.0)
 
 
 def test_orthogonalize_w_fixef_validation_and_rank_deficiency() -> None:
-    w = np.eye(6, 2)
-    xj = np.ones(6)
-    xjs = np.ones(6)
     x = np.arange(6, dtype=float).reshape(-1, 1)
 
     with pytest.raises(ValueError, match="row count"):
-        orthogonalize_w(w, xj, xjs, x, fixef_id=[1, 1, 2])
+        make_fixef_demeaner([1, 1, 2], 6)
     with pytest.raises(ValueError, match="1D or 2D"):
-        orthogonalize_w(w, xj, xjs, x, fixef_id="bad")
+        make_fixef_demeaner("bad", 6)
     with pytest.raises(ValueError, match="missing or NaN"):
-        orthogonalize_w(w, xj, xjs, x, fixef_id=[1.0, 1.0, np.nan, 2.0, 2.0, 2.0])
+        make_fixef_demeaner([1.0, 1.0, np.nan, 2.0, 2.0, 2.0], 6)
     with pytest.raises(ValueError, match="non-finite"):
-        orthogonalize_w(w, xj, xjs, x, fixef_id=[1.0, 1.0, np.inf, 2.0, 2.0, 2.0])
+        make_fixef_demeaner([1.0, 1.0, np.inf, 2.0, 2.0, 2.0], 6)
     with pytest.raises(ValueError, match="rank deficient"):
-        orthogonalize_w(
-            w,
-            xj,
-            xjs,
+        make_ols_residualizer(
             np.column_stack((np.ones(6), x)),
-            include_intercept=False,
-            fixef_id=[1, 1, 1, 2, 2, 2],
+            demean=make_fixef_demeaner([1, 1, 1, 2, 2, 2], 6),
+            require_full_rank=True,
         )
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
-def test_python_r_parity_orthogonalize_w() -> None:
+def test_python_r_parity_project_conditional_weights() -> None:
     w = [
         [1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0)],
         [1.0 / math.sqrt(2.0), -1.0 / math.sqrt(2.0)],
@@ -279,12 +261,11 @@ def test_python_r_parity_orthogonalize_w() -> None:
         """,
         payload={"w": w, "xj": xj, "xjs": xjs, "model_mat": model_mat},
     )
-    py_value = orthogonalize_w(
+    py_value = project_conditional_weights(
         np.array(w),
         np.array(xj),
         np.array(xjs),
-        np.array(model_mat),
-        include_intercept=False,
+        make_ols_residualizer(np.array(model_mat)),
     )
 
     npt.assert_allclose(py_value, np.array(r_value), atol=ATOL, rtol=RTOL)
@@ -303,9 +284,7 @@ def test_python_r_parity_orthogonalize_w_one_way_fixef(
     xjs = np.sign(xj)
     model_mat = rng.normal(size=(n, 2)) + 0.4 * fe[:, None]
 
-    # Pinned scpcR v0.1.3 swapped xj/xjs inside .orthogonalize_W; invoke its
-    # live .make_ols_residualizer with the corrected S_x M_V D_x order, plus
-    # verify .orthogonalize_W directly when xj == xjs.
+    # Apply the corrected S_x M_V D_x order using the pinned R residualizer.
     r_value = execute_r_code(
         """
         W <- matrix(unlist(payload$w), nrow = length(payload$w), byrow = TRUE)
@@ -334,44 +313,15 @@ def test_python_r_parity_orthogonalize_w_one_way_fixef(
             "fixef_id": fe.tolist(),
         },
     )
-    py_value = orthogonalize_w(
+    py_value = project_conditional_weights(
         w,
         xj,
         xjs,
-        model_mat,
-        include_intercept=include_intercept,
-        fixef_id=fe,
+        make_ols_residualizer(
+            model_mat, demean=make_fixef_demeaner(fe, n), require_full_rank=True
+        ),
     )
     npt.assert_allclose(py_value, np.array(r_value), atol=ATOL, rtol=RTOL)
-
-    r_direct = execute_r_code(
-        """
-        result <- getFromNamespace(".orthogonalize_W", "scpcR")(
-          matrix(unlist(payload$w), nrow = length(payload$w), byrow = TRUE),
-          unlist(payload$xjs),
-          unlist(payload$xjs),
-          matrix(unlist(payload$model_mat), nrow = length(payload$model_mat), byrow = TRUE),
-          isTRUE(payload$include_intercept),
-          unlist(payload$fixef_id)
-        )
-        """,
-        payload={
-            "w": w.tolist(),
-            "xjs": xjs.tolist(),
-            "model_mat": model_mat.tolist(),
-            "include_intercept": include_intercept,
-            "fixef_id": fe.tolist(),
-        },
-    )
-    py_direct = orthogonalize_w(
-        w,
-        xjs,
-        xjs,
-        model_mat,
-        include_intercept=include_intercept,
-        fixef_id=fe,
-    )
-    npt.assert_allclose(py_direct, np.array(r_direct), atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
@@ -413,13 +363,15 @@ def test_python_r_parity_orthogonalize_w_two_way_fixef() -> None:
             "fe2": fe2.tolist(),
         },
     )
-    py_value = orthogonalize_w(
+    py_value = project_conditional_weights(
         w,
         xj,
         xjs,
-        model_mat,
-        include_intercept=True,
-        fixef_id=np.column_stack((fe1, fe2)),
+        make_ols_residualizer(
+            model_mat,
+            demean=make_fixef_demeaner(np.column_stack((fe1, fe2)), n),
+            require_full_rank=True,
+        ),
     )
 
     npt.assert_allclose(py_value, np.array(r_value), atol=ATOL, rtol=RTOL)
@@ -433,12 +385,14 @@ def test_orthogonalize_w_multiway_absorption_detects_collapse() -> None:
     values = np.random.default_rng(95).normal(size=len(groups) + 1)[g2]
     w = np.column_stack((np.ones(n), values))
     with pytest.raises(ValueError, match="collapsed"):
-        orthogonalize_w(
+        project_conditional_weights(
             w,
             np.ones(n),
             np.ones(n),
-            np.empty((n, 0)),
-            fixef_id=[list(row) for row in zip(g1, g2)],
+            make_ols_residualizer(
+                np.empty((n, 0)),
+                demean=make_fixef_demeaner(np.column_stack((g1, g2)), n),
+            ),
         )
 
 
@@ -485,12 +439,6 @@ def test_fixef_demeaner_handles_binary_ulp_single_group_offset_and_balanced_2way
 
 
 def test_cluster_direction_normalization_handles_extreme_scales() -> None:
-    from scpc.utils.matrix import (
-        make_iv_residualizer,
-        orthogonalize_w_cluster,
-        orthogonalize_w_cluster_iv,
-    )
-
     rng = np.random.default_rng(199)
     nclust = 6
     cl_idx = np.repeat(np.arange(nclust), 3)
@@ -499,12 +447,13 @@ def test_cluster_direction_normalization_handles_extreme_scales() -> None:
     x = rng.normal(size=(n, 2))
     z = rng.normal(size=(n, 2)) + 0.5 * x
     xj_base = rng.normal(size=n)
+    ols_res = make_ols_residualizer(np.column_stack((np.ones(n), x)))
     iv_res = make_iv_residualizer(x, z, transpose=True)
 
-    base_ols = orthogonalize_w_cluster(w, cl_idx, xj_base, x)
-    base_iv = orthogonalize_w_cluster_iv(w, cl_idx, xj_base, iv_res)
+    base_ols = project_clustered_weights(w, cl_idx, xj_base, ols_res)
+    base_iv = project_clustered_weights(w, cl_idx, xj_base, iv_res)
     for scale in (1e200, 1e-200):
-        scaled_ols = orthogonalize_w_cluster(w, cl_idx, xj_base * scale, x)
-        scaled_iv = orthogonalize_w_cluster_iv(w, cl_idx, xj_base * scale, iv_res)
+        scaled_ols = project_clustered_weights(w, cl_idx, xj_base * scale, ols_res)
+        scaled_iv = project_clustered_weights(w, cl_idx, xj_base * scale, iv_res)
         npt.assert_allclose(scaled_ols / scale, base_ols, rtol=1e-12, atol=1e-12)
         npt.assert_allclose(scaled_iv / scale, base_iv, rtol=1e-12, atol=1e-12)

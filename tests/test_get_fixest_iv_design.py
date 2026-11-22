@@ -59,9 +59,7 @@ def test_get_fixest_iv_design_extracts_the_stored_pyfixest_matrices() -> None:
         design["model_mat"][:, endo_idx],
         raw_x[:, endo_idx],
     )
-    assert design["coef_names"] == coef_names
     assert design["has_fixef"] is False
-    assert design["fixef_id"] is None
 
 
 def test_get_fixest_iv_design_marks_one_way_absorbed_fixed_effects() -> None:
@@ -87,7 +85,6 @@ def test_get_fixest_iv_design_marks_one_way_absorbed_fixed_effects() -> None:
     fit_x = np.asarray(model._model_1st_stage._Y_hat_link, dtype=float)[:, None]
 
     assert design["has_fixef"] is True
-    assert design["fixef_id"] is None
     npt.assert_allclose(design["X"], raw_x, atol=1e-12, rtol=0.0)
     npt.assert_allclose(design["Z"], raw_z, atol=1e-12, rtol=0.0)
     npt.assert_allclose(
@@ -114,7 +111,6 @@ def test_get_fixest_iv_design_marks_two_way_absorbed_fixed_effects() -> None:
     design = get_fixest_iv_design(model)
 
     assert design["has_fixef"] is True
-    assert design["fixef_id"] is None
     assert design["X"].shape[0] == len(data)
     assert design["Z"].shape[0] == len(data)
     assert design["model_mat"].shape[0] == len(data)

@@ -10,8 +10,7 @@ from scpc import scpc
 from scpc.core import load_rust_backend
 from scpc.utils.matrix import (
     make_iv_residualizer,
-    orthogonalize_w_iv,
-    orthogonalize_w_cluster_iv,
+    project_conditional_weights,
     project_clustered_weights,
 )
 
@@ -84,11 +83,11 @@ def test_oblique_weights_match_direct_matrix():
             for j in range(1, 4)
         ]
     )
-    actual = orthogonalize_w_cluster_iv(w, clusters, weights, transposed)
+    actual = project_clustered_weights(w, clusters, weights, transposed)
     np.testing.assert_allclose(actual[:, 1:], expected, atol=1e-12)
     sign = np.sign(weights)
     full = np.repeat(w, 2, axis=0)
-    actual = orthogonalize_w_iv(full, weights, sign, transposed)
+    actual = project_conditional_weights(full, weights, sign, transposed)
     np.testing.assert_allclose(
         actual[:, 1:],
         sign[:, None] * (m.T @ (weights[:, None] * full[:, 1:])),

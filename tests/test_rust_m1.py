@@ -23,7 +23,6 @@ from scpc import InvalidSampledCovarianceError, scpc
 from scpc.core import load_rust_backend
 from scpc.utils.matrix import lvech
 from scpc.utils.spatial import (
-    get_avc,
     get_distmat,
     get_rp,
 )
@@ -546,7 +545,7 @@ def test_m1_fixtures_parity_rust_vs_fallback_and_baseline(
     assert res_fb.coef_names == expected["coef_names"]
 
     dvec = lvech(get_distmat(df[["s_1", "s_2"]].to_numpy(dtype=np.float64), latlong))
-    assert abs(get_avc(res_fb.c0, dvec) - 0.03) < 1e-12
+    assert abs(np.mean(np.exp(-res_fb.c0 * dvec)) - 0.03) < 1e-12
 
     # Frozen fixtures reflect the historical 0.001-bracket c0 solver (~2e-3 relative).
     assert res_fb.c0 == pytest.approx(expected["c0"], rel=2e-3, abs=1e-12)
@@ -590,7 +589,7 @@ def test_m1_fixtures_parity_rust_vs_fallback_and_baseline(
         assert res_rust.tied is False
         assert res_rust.q == res_fb.q
         assert res_rust.coef_names == res_fb.coef_names
-        assert abs(get_avc(res_rust.c0, dvec) - 0.03) < 1e-12
+        assert abs(np.mean(np.exp(-res_rust.c0 * dvec)) - 0.03) < 1e-12
         assert res_rust.c0 == pytest.approx(res_fb.c0, rel=1e-10, abs=1e-10)
         assert res_rust.cv == pytest.approx(res_fb.cv, rel=1e-10, abs=1e-10)
         npt.assert_allclose(
@@ -710,7 +709,7 @@ def test_scale_invariant_calibration_and_colocation_floor() -> None:
         d_30_base = lvech(
             get_distmat(df_30[["s_1", "s_2"]].to_numpy(dtype=np.float64), False)
         )
-        assert abs(get_avc(res_30_base.c0, d_30_base) - 0.03) < 1e-12
+        assert abs(np.mean(np.exp(-res_30_base.c0 * d_30_base)) - 0.03) < 1e-12
 
         for scale in (1e-6, 1e6):
             df_30_scaled = df_30.copy()
@@ -730,7 +729,7 @@ def test_scale_invariant_calibration_and_colocation_floor() -> None:
                     df_30_scaled[["s_1", "s_2"]].to_numpy(dtype=np.float64), False
                 )
             )
-            assert abs(get_avc(res_30_scaled.c0, d_30_scaled) - 0.03) < 1e-12
+            assert abs(np.mean(np.exp(-res_30_scaled.c0 * d_30_scaled)) - 0.03) < 1e-12
             assert res_30_scaled.c0 * scale == pytest.approx(
                 res_30_base.c0, rel=1e-10, abs=1e-12
             )
@@ -807,7 +806,7 @@ def test_scale_invariant_calibration_and_colocation_floor() -> None:
             uncond=True,
             backend=backend,
         )
-        assert abs(get_avc(res_ok.c0, coloc_distv) - 0.5) < 1e-12
+        assert abs(np.mean(np.exp(-res_ok.c0 * coloc_distv)) - 0.5) < 1e-12
 
         for bad_avc in (floor_corr, floor_corr - 0.05):
             with pytest.raises(ValueError):

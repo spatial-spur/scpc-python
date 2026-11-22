@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from scpc.utils.spatial import get_avc, get_c0_from_avc
+from scpc.utils.spatial import get_c0_from_avc
 from tests.config import ATOL, RTOL
 from tests.utils import execute_r_code
 
@@ -18,7 +18,7 @@ def test_get_c0_from_avc_inverts_the_target_average_correlation() -> None:
 
     assert c0 > 0
     assert c0 == pytest.approx(math.log(2.0), abs=1e-3)
-    assert get_avc(c0, dist) == pytest.approx(avc0, abs=3e-4)
+    assert np.mean(np.exp(-c0 * dist)) == pytest.approx(avc0, abs=3e-4)
 
 
 def test_python_r_parity_get_c0_from_avc() -> None:

@@ -6,7 +6,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from scpc.utils.matrix import get_w
+from scpc.utils.matrix import get_w_with_ties
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
 
@@ -29,7 +29,9 @@ def test_get_w_builds_the_expected_two_point_basis() -> None:
         ]
     )
 
-    assert_columns_allclose_up_to_sign(get_w(distmat, math.log(2.0), 1), expected)
+    basis, tied = get_w_with_ties(distmat, math.log(2.0), 1)
+    assert not tied
+    assert_columns_allclose_up_to_sign(basis, expected)
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
@@ -48,6 +50,6 @@ def test_python_r_parity_get_w() -> None:
         """,
         payload={"distmat": distmat, "c0": c0, "qmax": qmax},
     )
-    py_value = get_w(np.array(distmat), c0, qmax)
+    py_value, _ = get_w_with_ties(np.array(distmat), c0, qmax)
 
     assert_columns_allclose_up_to_sign(py_value, np.array(r_value))

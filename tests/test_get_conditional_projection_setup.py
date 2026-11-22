@@ -7,8 +7,11 @@ import pyfixest as pf
 import pytest
 import statsmodels.formula.api as smf
 
-from scpc.utils.data import get_conditional_projection_setup
-from scpc.utils.data import get_fixest_iv_design
+from scpc.utils.data import (
+    get_conditional_projection_setup,
+    get_fixest_iv_design,
+    get_pyfixest_raw_ols_design,
+)
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code, reorder_r_columns_to_py
 from tests.utils import make_one_way_fe_iv_data
@@ -21,13 +24,10 @@ def test_get_conditional_projection_setup_keeps_the_baseline_matrix_for_statsmod
     model = smf.ols("y ~ x", data=data).fit()
     model_mat = np.array([[1.0, 0.0], [1.0, 1.0], [1.0, 3.0]])
 
-    setup = get_conditional_projection_setup(model, model_mat, n=3, uncond=False)
+    setup = get_conditional_projection_setup(model, model_mat, n=3)
 
     npt.assert_allclose(setup.model_mat, model_mat, atol=1e-12, rtol=0.0)
-    assert setup.include_intercept is False
-    assert setup.fixef_id is None
     assert setup.residualize is None
-    assert setup.is_iv is False
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
@@ -55,8 +55,7 @@ def test_python_r_parity_get_conditional_projection_setup() -> None:
           payload$uncond
         )
         result <- list(
-          model_mat = unname(split(out$model_mat, row(out$model_mat))),
-          fixef_id = out$fixef_id
+          model_mat = unname(split(out$model_mat, row(out$model_mat)))
         )
         """,
         payload=payload,
@@ -65,18 +64,15 @@ def test_python_r_parity_get_conditional_projection_setup() -> None:
         model,
         np.array(payload["model_mat"]),
         n=payload["n"],
-        uncond=payload["uncond"],
     )
 
     npt.assert_allclose(
         py_value.model_mat, np.array(r_value["model_mat"]), atol=ATOL, rtol=RTOL
     )
-    assert py_value.fixef_id == r_value["fixef_id"]
     assert py_value.residualize is None
-    assert py_value.is_iv is False
 
 
-def test_get_conditional_projection_setup_marks_pyfixest_iv_models() -> None:
+def test_get_conditional_projection_setup_uses_iv_residualizer() -> None:
     data = pd.DataFrame(
         {
             "y": [1.0, 2.0, 3.0, 4.0, 5.0],
@@ -89,9 +85,7 @@ def test_get_conditional_projection_setup_marks_pyfixest_iv_models() -> None:
     model_mat = np.asarray(model._X, dtype=float)
     design = get_fixest_iv_design(model)
 
-    setup = get_conditional_projection_setup(
-        model, model_mat, n=model_mat.shape[0], uncond=False
-    )
+    setup = get_conditional_projection_setup(model, model_mat, n=model_mat.shape[0])
 
     npt.assert_allclose(
         setup.model_mat,
@@ -99,10 +93,7 @@ def test_get_conditional_projection_setup_marks_pyfixest_iv_models() -> None:
         atol=1e-12,
         rtol=0.0,
     )
-    assert setup.include_intercept is True
-    assert setup.fixef_id is None
     assert callable(setup.residualize)
-    assert setup.is_iv is True
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
@@ -115,7 +106,6 @@ def test_python_r_parity_get_conditional_projection_setup_for_pyfixest_fe_iv() -
         model,
         model_mat,
         n=model_mat.shape[0],
-        uncond=False,
     )
     y = np.column_stack(
         (
@@ -168,8 +158,6 @@ def test_python_r_parity_get_conditional_projection_setup_for_pyfixest_fe_iv() -
     )
 
     npt.assert_allclose(py_value.model_mat, r_model_mat, atol=ATOL, rtol=RTOL)
-    assert py_value.include_intercept is False
-    assert py_value.fixef_id is not None
     assert py_value.residualize is not None
     # The installed historical R helper applies M; SCPC denominator weights
     # require M.T. Construct the full FE and IV projection independently.
@@ -181,7 +169,6 @@ def test_python_r_parity_get_conditional_projection_setup_for_pyfixest_fe_iv() -
     pz = z @ np.linalg.pinv(z)
     m = fe_m - x @ np.linalg.solve(x.T @ pz @ x, x.T @ pz)
     npt.assert_allclose(py_value.residualize(y), m.T @ y, atol=ATOL, rtol=RTOL)
-    assert py_value.is_iv is True
 
 
 def test_get_conditional_projection_setup_uses_demeaned_pyfixest_fe_matrix() -> None:
@@ -194,16 +181,11 @@ def test_get_conditional_projection_setup_uses_demeaned_pyfixest_fe_matrix() -> 
     )
     model = pf.feols("y ~ x | fe", data=data)
     model_mat = np.asarray(model._X, dtype=float)
-
-    setup = get_conditional_projection_setup(
-        model, model_mat, n=model_mat.shape[0], uncond=False
-    )
+    raw = get_pyfixest_raw_ols_design(model, len(data))
+    setup = get_conditional_projection_setup(model, raw, n=len(data))
 
     npt.assert_allclose(setup.model_mat, model_mat, atol=1e-12, rtol=0.0)
-    assert setup.include_intercept is False
-    assert setup.fixef_id is not None
     assert setup.residualize is not None
-    assert setup.is_iv is False
     npt.assert_allclose(setup.residualize(np.ones(4)), 0.0, atol=1e-12)
 
 
@@ -218,7 +200,7 @@ def test_python_r_parity_get_conditional_projection_setup_for_pyfixest_fe() -> N
     }
     data = pd.DataFrame(payload["data"])
     model = pf.feols("y ~ x | fe", data=data)
-    model_mat = np.asarray(model._X, dtype=float)
+    raw = get_pyfixest_raw_ols_design(model, len(data))
 
     r_value = execute_r_code(
         """
@@ -238,17 +220,15 @@ def test_python_r_parity_get_conditional_projection_setup_for_pyfixest_fe() -> N
         )
         result <- list(
           coef_names = unname(names(stats::coef(fit))),
-          model_mat = unname(split(out$model_mat, row(out$model_mat))),
-          include_intercept = out$include_intercept
+          model_mat = unname(split(out$model_mat, row(out$model_mat)))
         )
         """,
         payload=payload,
     )
     py_value = get_conditional_projection_setup(
         model,
-        model_mat,
-        n=model_mat.shape[0],
-        uncond=False,
+        raw,
+        n=len(data),
     )
     r_value_matrix = reorder_r_columns_to_py(
         [str(name) for name in model._coefnames],
@@ -257,4 +237,3 @@ def test_python_r_parity_get_conditional_projection_setup_for_pyfixest_fe() -> N
     )
 
     npt.assert_allclose(py_value.model_mat, r_value_matrix, atol=ATOL, rtol=RTOL)
-    assert py_value.include_intercept is r_value["include_intercept"]

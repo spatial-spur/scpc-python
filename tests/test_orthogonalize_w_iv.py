@@ -6,12 +6,12 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from scpc.utils.matrix import make_iv_residualizer, orthogonalize_w_iv
+from scpc.utils.matrix import make_iv_residualizer, project_conditional_weights
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
 
 
-def test_orthogonalize_w_iv_leaves_a_simple_basis_unchanged() -> None:
+def test_project_conditional_weights_leaves_a_simple_basis_unchanged() -> None:
     wfin = np.array(
         [
             [1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0)],
@@ -23,7 +23,7 @@ def test_orthogonalize_w_iv_leaves_a_simple_basis_unchanged() -> None:
     residualize = make_iv_residualizer(np.ones((2, 1)), np.ones((2, 1)))
 
     npt.assert_allclose(
-        orthogonalize_w_iv(wfin, xj, xjs, residualize),
+        project_conditional_weights(wfin, xj, xjs, residualize),
         wfin,
         atol=1e-12,
         rtol=0.0,
@@ -31,7 +31,7 @@ def test_orthogonalize_w_iv_leaves_a_simple_basis_unchanged() -> None:
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
-def test_python_r_parity_orthogonalize_w_iv() -> None:
+def test_python_r_parity_project_conditional_weights() -> None:
     payload = {
         "wfin": [
             [1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0)],
@@ -58,7 +58,7 @@ def test_python_r_parity_orthogonalize_w_iv() -> None:
         """,
         payload=payload,
     )
-    py_value = orthogonalize_w_iv(
+    py_value = project_conditional_weights(
         np.array(payload["wfin"]),
         np.array(payload["xj"]),
         np.array(payload["xjs"]),

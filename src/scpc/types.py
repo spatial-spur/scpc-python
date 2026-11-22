@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeAlias, TypedDict
 
@@ -25,8 +25,6 @@ class FixestSpec(TypedDict):
     X: MatrixLike
     Z: MatrixLike
     model_mat: MatrixLike
-    coef_names: list[str]
-    fixef_id: ArrayLike | None
     has_fixef: bool
 
 
@@ -46,16 +44,8 @@ class ConditionalProjectionSetup:
 
     model_mat: MatrixLike
     """Design matrix aligned to the rows kept in the model."""
-    include_intercept: bool
-    """Whether the adjustment should include an intercept term."""
-    fixef_id: ArrayLike | None
-    """Fixed-effect identifiers used for demeaning, if any."""
-    residualize: Any | None = None
+    residualize: Callable[[MatrixLike], np.ndarray] | None = None
     """Residualizer for absorbed OLS or IV."""
-    is_iv: bool = False
-    """Whether the conditional adjustment should use the IV branch."""
-    ols_basis: np.ndarray | None = None
-    """Common nuisance basis for conditional OLS with fixed effects."""
 
 
 @dataclass(slots=True)

@@ -52,24 +52,6 @@ def validate_sampled_covariance(omega: np.ndarray, grid_index: int) -> None:
         raise InvalidSampledCovarianceError(message)
 
 
-def get_avc(c: float, dist: ArrayLike) -> float:
-    """Evaluate average pairwise correlation under an exponential kernel.
-
-    This helper turns a kernel scale and a collection of pairwise distances
-    into the average correlation summary that SCPC uses as its user-facing
-    spatial sensitivity parameter.
-
-    Args:
-        c: Exponential kernel scale.
-        dist: Pairwise distances.
-
-    Returns:
-        The implied average pairwise correlation.
-    """
-    dist = np.asarray(dist, dtype=float)
-    return float(np.mean(np.exp(-c * dist)))
-
-
 def get_distmat(s: MatrixLike, latlong: bool) -> MatrixLike:
     """Compute the pairwise distance matrix from observation coordinates.
 

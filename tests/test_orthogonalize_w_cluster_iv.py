@@ -6,12 +6,12 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from scpc.utils.matrix import make_iv_residualizer, orthogonalize_w_cluster_iv
+from scpc.utils.matrix import make_iv_residualizer, project_clustered_weights
 from tests.config import ATOL, RTOL
 from tests.utils import R, execute_r_code
 
 
-def test_orthogonalize_w_cluster_iv_accepts_preencoded_cluster_indices() -> None:
+def test_project_clustered_weights_accepts_preencoded_cluster_indices() -> None:
     wfin = np.array(
         [
             [1.0 / math.sqrt(3.0), 1.0 / math.sqrt(2.0)],
@@ -24,14 +24,14 @@ def test_orthogonalize_w_cluster_iv_accepts_preencoded_cluster_indices() -> None
     xj_indiv = np.array([1.0, 2.0, 1.5, 0.5])
     residualize = make_iv_residualizer(np.ones((4, 1)), np.ones((4, 1)))
 
-    from_labels = orthogonalize_w_cluster_iv(wfin, cl_labels, xj_indiv, residualize)
-    from_idx = orthogonalize_w_cluster_iv(wfin, cl_idx, xj_indiv, residualize)
+    from_labels = project_clustered_weights(wfin, cl_labels, xj_indiv, residualize)
+    from_idx = project_clustered_weights(wfin, cl_idx, xj_indiv, residualize)
 
     npt.assert_allclose(from_idx, from_labels, atol=1e-12, rtol=0.0)
 
 
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
-def test_python_r_parity_orthogonalize_w_cluster_iv() -> None:
+def test_python_r_parity_project_clustered_weights() -> None:
     payload = {
         "wfin": [
             [1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0)],
@@ -58,7 +58,7 @@ def test_python_r_parity_orthogonalize_w_cluster_iv() -> None:
         """,
         payload=payload,
     )
-    py_value = orthogonalize_w_cluster_iv(
+    py_value = project_clustered_weights(
         np.array(payload["wfin"]),
         np.array(payload["cl_vec"]),
         np.array(payload["xj_indiv"]),

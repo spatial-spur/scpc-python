@@ -26,9 +26,7 @@ from .utils.data import (
     resolve_coords_input,
 )
 from .utils.matrix import (
-    iv_projector_factors,
     make_ols_residualizer,
-    ols_design_span,
     project_clustered_weights,
     project_conditional_weights,
 )
@@ -112,40 +110,6 @@ def load_rust_backend() -> Any | None:
     if getattr(rust_mod, "API_VERSION", None) != RUST_API_VERSION:
         return None
     return rust_mod
-
-
-def compute_orthogonal_projector(
-    model_mat: MatrixLike,
-    *,
-    include_intercept: bool,
-) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Compute orthonormal `(U, V)` factors for `I - X X^+` via thin SVD."""
-    x_design = np.asarray(model_mat, dtype=np.float64)
-    columns = getattr(model_mat, "columns", None)
-    has_intercept_col = columns is not None and "(Intercept)" in columns
-    if include_intercept and not has_intercept_col:
-        x_design = np.column_stack(
-            (np.ones(x_design.shape[0], dtype=np.float64), x_design)
-        )
-    if x_design.shape[1] == 0:
-        return None, None
-    proj = ols_design_span(x_design, require_full_rank=True)
-    if proj.shape[1] == 0:
-        return None, None
-    proj = np.ascontiguousarray(proj, dtype=np.float64)
-    return proj, proj
-
-
-def compute_iv_projector(
-    x_iv: MatrixLike,
-    z_iv: MatrixLike,
-    *,
-    tol: float = 1e-10,
-    demean=None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute oblique `(U, V)` factors for `A -> A - X (X' P_Z X)^{-1} X' P_Z A`."""
-    u, v = iv_projector_factors(x_iv, z_iv, tol=tol, demean=demean)
-    return np.ascontiguousarray(u), np.ascontiguousarray(v)
 
 
 def scpc(
@@ -390,9 +354,7 @@ def scpc(
             model,
             direction_design,
             n=n,
-            uncond=False,
             iv_design=iv_design,
-            raw_ols_design=model_has_fe and iv_design is None,
         )
         model_mat_cond = np.asarray(cond_setup.model_mat, dtype=float)
         if model_mat_cond.shape != (n, p):
@@ -450,13 +412,13 @@ def scpc(
             cond_residualize = _permuted_resid
 
     out = np.full((k_use, 6), np.nan)
-    levs = np.array([0.32, 0.10, 0.05, 0.01], dtype=float)
-    cvs_mat = np.full((k_use, 4), np.nan) if cvs else None
-    cvs_uncond = (
-        np.array([get_cv(omsfin, q, level) for level in levs], dtype=float)
-        if cvs
-        else None
-    )
+
+    def critical_values(oms: MatrixLike, cv95: float) -> np.ndarray:
+        return np.array(
+            [get_cv(oms, q, 0.32), get_cv(oms, q, 0.10), cv95, get_cv(oms, q, 0.01)]
+        )
+
+    cvs_mat = np.tile(critical_values(omsfin, cvfin), (k_use, 1)) if cvs else None
 
     for j in range(k_use):
         wj = wj_mat[:, j]
@@ -516,6 +478,8 @@ def scpc(
             cvx = get_cv(omsx, q, 0.05)
             p_final = max(p_u, p_c)
             cv = max(cvfin, cvx)
+            if cvs_mat is not None:
+                cvs_mat[j] = np.maximum(cvs_mat[j], critical_values(omsx, cvx))
         else:
             p_final = p_u
             cv = cvfin
@@ -531,15 +495,6 @@ def scpc(
             ],
             dtype=float,
         )
-
-        if cvs and cvs_mat is not None and cvs_uncond is not None:
-            cvs_vec = cvs_uncond.copy()
-            if not uncond:
-                cvs_cond = np.array(
-                    [get_cv(omsx, q, level) for level in levs], dtype=float
-                )
-                cvs_vec = np.maximum(cvs_vec, cvs_cond)
-            cvs_mat[j, :] = cvs_vec
 
     return SCPCResult(
         scpcstats=out,

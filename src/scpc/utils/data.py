@@ -471,8 +471,6 @@ def get_fixest_iv_design(
         "X": x,
         "Z": z,
         "model_mat": model_mat,
-        "coef_names": coef_names,
-        "fixef_id": None,
         "has_fixef": has_fixest_fe(model),
     }
 
@@ -481,9 +479,7 @@ def get_conditional_projection_setup(
     model: ModelLike,
     model_mat: MatrixLike,
     n: int,
-    uncond: bool,
     iv_design: FixestSpec | None = None,
-    raw_ols_design: bool = False,
 ) -> ConditionalProjectionSetup:
     """Prepare the regression-side objects for conditional SCPC.
 
@@ -494,12 +490,9 @@ def get_conditional_projection_setup(
 
     Args:
         model: Fitted model object.
-        model_mat: Raw model matrix extracted from the model.
+        model_mat: Design extracted from the model, before any FE absorption.
         n: Expected number of active observations.
-        uncond: Whether unconditional inference was requested.
         iv_design: Previously extracted IV design, if available.
-        raw_ols_design: Whether `model_mat` already contains the active raw
-            PyFixest OLS design before fixed-effect absorption.
 
     Returns:
         The normalized conditional projection setup.
@@ -507,17 +500,9 @@ def get_conditional_projection_setup(
     Raises:
         ValueError: Raised later if the regression objects cannot be aligned.
     """
-    # The fitted model matrix already contains any intercept.
-    setup = ConditionalProjectionSetup(
-        model_mat=np.asarray(model_mat, dtype=float),
-        include_intercept=False,
-        fixef_id=None,
-    )
-    if uncond:
-        return setup
-
+    model_mat = np.asarray(model_mat, dtype=float)
+    setup = ConditionalProjectionSetup(model_mat=model_mat)
     if is_pyfixest_model(model):
-        model_mat = np.asarray(model_mat, dtype=float)
         if model_mat.shape[0] != n:
             raise ValueError(
                 "Internal error: pyfixest conditional regressors have an "
@@ -543,31 +528,22 @@ def get_conditional_projection_setup(
 
             return ConditionalProjectionSetup(
                 model_mat=model_mat_iv,
-                include_intercept=not bool(design["has_fixef"]),
-                fixef_id=np.asarray(getattr(model, "_fe"))
-                if demean is not None
-                else None,
                 residualize=defer_residualizer(
                     lambda: make_iv_residualizer(
                         x_iv, z_iv, demean=demean, transpose=True
                     )
                 ),
-                is_iv=True,
             )
 
         if has_fixest_fe(model):
             demean = make_pyfixest_demeaner(model)
-            raw = model_mat if raw_ols_design else get_pyfixest_raw_ols_design(model, n)
             model_mat = demean(
-                raw, context="PyFixest OLS regressor", drop_absorbed=True
+                model_mat, context="PyFixest OLS regressor", drop_absorbed=True
             )
             ols_basis = ols_design_span(model_mat, require_full_rank=True)
             return ConditionalProjectionSetup(
                 model_mat=model_mat,
-                include_intercept=False,
-                fixef_id=np.asarray(getattr(model, "_fe")),
                 residualize=make_orthogonal_residualizer(ols_basis, demean=demean),
-                ols_basis=ols_basis,
             )
 
         return setup
