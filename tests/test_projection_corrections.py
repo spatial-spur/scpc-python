@@ -39,6 +39,42 @@ def test_cluster_direction_rescaling_preserves_a_tiny_clusters_signs():
 
 
 @pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_singleton_labels_preserve_a_zero_coefficient_direction(backend):
+    x = np.arange(-2.0, 3.0)
+    d = pd.DataFrame(
+        {
+            "x": x,
+            "y": x + np.array([1.0, -2.0, 0.0, 2.0, -1.0]),
+            "s": np.random.default_rng(42).uniform(size=5),
+            "group": np.arange(5),
+        }
+    )
+    fit = pf.feols("y ~ x", d)
+    opts: dict[str, Any] = dict(
+        coords_euclidean=["s"], avc=0.3, cvs=True, backend=backend, nthreads=1
+    )
+    flat = scpc(fit, d, **opts)
+    singleton = scpc(fit, d, cluster="group", **opts)
+    assert singleton.q == flat.q
+    np.testing.assert_allclose(singleton.scpcstats, flat.scpcstats, atol=1e-10)
+    assert singleton.scpccvs is not None and flat.scpccvs is not None
+    np.testing.assert_allclose(singleton.scpccvs, flat.scpccvs, atol=1e-10)
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_large_intercept_shift_preserves_the_standard_error(backend):
+    n = 30
+    d = pd.DataFrame({"y": (np.arange(n) % 7 - 3) / 4, "s": np.linspace(0.0, 1.0, n)})
+    shifted = d.assign(y=d["y"] + 1e12)
+    opts: dict[str, Any] = dict(coords_euclidean=["s"], backend=backend, nthreads=1)
+    base = scpc(smf.ols("y ~ 1", d).fit(), d, **opts)
+    result = scpc(smf.ols("y ~ 1", shifted).fit(), shifted, **opts)
+    beta, se, t = result.scpcstats[0, :3]
+    assert se == pytest.approx(base.scpcstats[0, 1], rel=1e-12)
+    assert t == pytest.approx(beta / se, rel=1e-12)
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_unconditional_scpc_skips_conditional_design(monkeypatch, backend):
     rng = np.random.default_rng(182)
     df = pd.DataFrame(rng.normal(size=(30, 4)), columns=["y", "x", "s1", "s2"])

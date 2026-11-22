@@ -853,7 +853,10 @@ def test_near_zero_t_statistic_probability() -> None:
         fit, df, coords_euclidean=["s"], avc=0.03, uncond=True, backend="fallback"
     )
     assert res_fb.q == 1
-    assert res_fb.scpcstats[0, 2] == pytest.approx(1e-6, rel=1e-10, abs=1e-16)
+    # The fitted intercept supplies the numerator. The two-point SE is exactly one.
+    assert res_fb.scpcstats[0, 2] == pytest.approx(
+        float(fit.params.iloc[0]), rel=1e-10, abs=1e-16
+    )
     assert res_fb.scpcstats[0, 3] == pytest.approx(expected_p, abs=1e-12, rel=0.0)
 
     if rust_available():

@@ -270,6 +270,9 @@ def normalize_cluster_direction(
         where=cl_denom > 0.0,
     )
     xjs_indiv[~np.isfinite(xjs_indiv)] = 0.0
+    # An exact zero in a singleton follows the unclustered sign convention.
+    singleton = np.bincount(cl_idx, minlength=nclust)[cl_idx] == 1
+    xjs_indiv[singleton & (row_scale == 0.0)] = 1.0
     return xjs_indiv
 
 

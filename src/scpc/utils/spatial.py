@@ -323,8 +323,7 @@ def sampled_covariance_grid(
 ) -> list[MatrixLike]:
     """Evaluate the covariance grid using a fixed set of sampled site pairs."""
     w = np.asarray(w, dtype=float)
-    nc = get_nc(c0, cmax, cgridfac)
-    oms: list[MatrixLike] = [np.empty((0, 0)) for _ in range(nc)]
+    oms: list[MatrixLike] = []
 
     inds, dist = pairs
     n = w.shape[0]
@@ -333,14 +332,12 @@ def sampled_covariance_grid(
     w2 = w[inds[1:]]
 
     gram = w.T @ w
-    c = c0
-    for i in range(nc):
+    for i, c in enumerate(kernel_scale_grid(c0, cmax, cgridfac)):
         cd = np.exp(-c * dist)
         cross = w1.T @ (w2 * cd[:, None])
         omega = gram + multiplier * (cross + cross.T)
         validate_sampled_covariance(omega, i)
-        oms[i] = omega
-        c = c * cgridfac
+        oms.append(omega)
 
     return oms
 
@@ -876,6 +873,20 @@ def get_nc(c0: float, cmax: float, cgridfac: float) -> int:
     return max(2, math.ceil(log_ratio / math.log(cgridfac)))
 
 
+def kernel_scale_grid(c0: float, cmax: float, cgridfac: float) -> list[float]:
+    """Keep the geometric grid and evaluate its finite upper endpoint."""
+    scales = []
+    c = c0
+    for _ in range(get_nc(c0, cmax, cgridfac)):
+        if not math.isfinite(c):
+            break
+        scales.append(c)
+        c *= cgridfac
+    if math.isfinite(cmax) and cmax > scales[-1]:
+        scales.append(cmax)
+    return scales
+
+
 def get_oms(
     distmat: MatrixLike,
     c0: float,
@@ -902,14 +913,9 @@ def get_oms(
     distmat = np.asarray(distmat, dtype=float)
     w = np.asarray(w, dtype=float)
 
-    nc = get_nc(c0, cmax, cgridfac)
-    oms: list[MatrixLike] = [np.empty((0, 0)) for _ in range(nc)]
-    c = c0
-    for i in range(nc):
-        oms[i] = w.T @ (np.exp(-c * distmat) @ w)
-        c = c * cgridfac
-
-    return oms
+    return [
+        w.T @ (np.exp(-c * distmat) @ w) for c in kernel_scale_grid(c0, cmax, cgridfac)
+    ]
 
 
 def set_oms_wfin(

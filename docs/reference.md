@@ -23,8 +23,8 @@ Both of the following are supported:
 
 `scpc()` accepts fitted:
 
-- `statsmodels` regression results
-- `pyfixest` models, including IV specifications
+- unweighted `statsmodels` OLS regression results
+- unweighted `pyfixest` OLS and 2SLS fits
 
 It does not accept `FixestMulti`.
 
@@ -46,10 +46,9 @@ Do not pass both coordinate specifications in the same call.
 ### Clustering and Method Selection
 
 - `cluster` names an optional clustering column in `data`
-- when coordinates vary within clusters, `scpc-python` uses the first
-  observation's coordinates for each cluster and emits a warning
-- when a model uses absorbed fixed effects and external clustering, the
-  conditional adjustment is not implemented; use `uncond=True`
+- coordinates must be constant within each cluster
+- conditional inference accounts for absorbed fixed effects. Multiway
+  absorption uses the Python fallback
 - `method="auto"` selects the exact branch for smaller problems and the
   approximation branch once the large-`n` threshold is reached
 
@@ -81,8 +80,7 @@ scpc(
 
 **Parameters**
 
-- `model`: fitted model object. Supported classes include `statsmodels`
-  regression results and `pyfixest` fits, including IV specifications.
+- `model`: an unweighted OLS or supported PyFixest 2SLS fit.
 - `data`: data frame used to fit `model`, with the coordinate columns and any
   clustering variable.
 - `lon`, `lat` (`str | None`): longitude and latitude column names for
@@ -92,7 +90,8 @@ scpc(
 - `cluster` (`str | None`): optional clustering column in `data`.
 - `ncoef` (`int | None`): number of coefficients to report. `None` reports all
   coefficients.
-- `avc` (`float`): upper bound on average pairwise correlation. Must lie in
+- `avc` (`float`): upper bound on average pairwise correlation in the
+  calibration benchmark. Must lie in
   `(0.001, 0.99)`. Default: `0.03`.
 - `method` (`str`): spatial algorithm.
   - `"auto"`: choose between exact and approximate branches
@@ -107,7 +106,9 @@ scpc(
 
 **Returns**
 
-- `SCPCResult`
+- `SCPCResult` with marginal inference for each reported coefficient.
+  For 2SLS assumptions and scalar Anderson–Rubin inference, see
+  [Müller and Watson (2023), §5.3](https://www.princeton.edu/~mwatson/papers/Mueller_Watson_JBES_2023.pdf#page=15).
 
 ## Return Object
 

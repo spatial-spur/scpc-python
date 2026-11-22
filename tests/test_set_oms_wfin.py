@@ -131,10 +131,10 @@ def test_python_r_parity_set_oms_wfin_exact() -> None:
     )
     r_wfin = np.array(r_value["wfin"])
     assert_columns_allclose_up_to_sign(py_value.wfin, r_wfin)
-    assert len(py_value.omsfin) == len(r_value["omsfin"])
+    assert len(py_value.omsfin) == len(r_value["omsfin"]) + 1
     signs = get_column_signs(py_value.wfin, r_wfin)
     sign_matrix = np.diag(signs)
-    for py_om, r_om in zip(py_value.omsfin, r_value["omsfin"], strict=True):
+    for py_om, r_om in zip(py_value.omsfin[:-1], r_value["omsfin"], strict=True):
         npt.assert_allclose(
             py_om,
             sign_matrix @ np.array(r_om) @ sign_matrix,
@@ -196,10 +196,10 @@ def test_python_r_parity_set_oms_wfin_approx() -> None:
     npt.assert_allclose(py_value.coords, r_coords, atol=ATOL, rtol=RTOL)
     r_wfin = np.array(r_value["wfin"])
     assert_columns_allclose_up_to_sign(py_value.wfin, r_wfin)
-    assert len(py_value.omsfin) == len(r_value["omsfin"])
+    assert len(py_value.omsfin) == len(r_value["omsfin"]) + 1
     signs = get_column_signs(py_value.wfin, r_wfin)
     sign_matrix = np.diag(signs)
-    for py_om, r_om in zip(py_value.omsfin, r_value["omsfin"], strict=True):
+    for py_om, r_om in zip(py_value.omsfin[:-1], r_value["omsfin"], strict=True):
         npt.assert_allclose(
             py_om,
             sign_matrix @ np.array(r_om) @ sign_matrix,

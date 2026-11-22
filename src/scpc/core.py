@@ -345,7 +345,7 @@ def scpc(
         s_cluster = np.zeros((neff, s.shape[1]), dtype=float)
         np.add.at(s_cluster, cl_idx, s)
         s = s_cluster
-    wj_mat = neff * (s @ bread_inv[:k_use].T) + coef_use
+    influence = neff * (s @ bread_inv[:k_use].T)
     cond_residualize = None
     xj_mat = None
     if design is not None:
@@ -421,24 +421,26 @@ def scpc(
     cvs_mat = np.tile(critical_values(omsfin, cvfin), (k_use, 1)) if cvs else None
 
     for j in range(k_use):
-        wj = wj_mat[:, j]
-        wj_perm = wj[perm]
+        influence_column = influence[perm, j]
 
-        scale = float(np.max(np.abs(wj_perm)))
+        scale = float(np.max(np.abs(influence_column)))
         if not math.isfinite(scale) or scale == 0:
             raise ValueError("SCPC variance projection is degenerate.")
-        scaled_wj = wj_perm / scale
-        wj_norm = float(np.linalg.norm(scaled_wj))
-        denom = float(np.linalg.norm(wfin[:, 1:].T @ scaled_wj))
+        scaled_influence = influence_column / scale
+        scaled_influence -= float(np.mean(scaled_influence))
+        influence_norm = float(np.linalg.norm(scaled_influence))
+        denom = float(np.linalg.norm(wfin[:, 1:].T @ scaled_influence))
         if (
             not math.isfinite(denom)
-            or not math.isfinite(wj_norm)
-            or wj_norm == 0.0
-            or denom <= 1e-12 * wj_norm
+            or not math.isfinite(influence_norm)
+            or influence_norm == 0.0
+            or denom <= 1e-12 * influence_norm
         ):
             raise ValueError("SCPC variance projection is degenerate.")
-        tau_u = math.sqrt(q) * float(np.dot(wfin[:, 0], scaled_wj)) / denom
         se = (denom / (math.sqrt(q) * math.sqrt(neff))) * scale
+        if not math.isfinite(se) or se == 0.0:
+            raise ValueError("SCPC standard error is outside the floating-point range.")
+        tau_u = float(coef_use[j]) / se
         p_u = max_rp(omsfin, q, abs(tau_u) / math.sqrt(q))[0]
 
         if xj_mat is not None and cond_residualize is not None:

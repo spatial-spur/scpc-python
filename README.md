@@ -34,9 +34,10 @@ Müller and Watson (2023), §5.1. SCPC supports unweighted OLS and PyFixest
 Use `backend="auto"` (the default), `"rust"`, or `"fallback"` to select
 execution. `SPATIAL_BACKEND` applies when you omit the argument. The result's
 `backend` reports the backend that ran, and `fallback_reason` records an
-automatic change. Set `nthreads=1` for single-threaded Rust execution. In
-multiprocessing code that initializes native threads before starting workers,
-use the `spawn` or `forkserver` start method.
+automatic change. Set `nthreads=1` for a single Rust worker. Linear algebra
+providers manage their internal threading. In multiprocessing code that
+initializes native threads before starting workers, use the `spawn` or
+`forkserver` start method.
 
 With `backend="rust"`, Python aligns the estimation sample, coordinates and
 fitted model inputs. Rust aggregates cluster scores, absorbs one-way fixed
@@ -128,13 +129,45 @@ The most important `scpc()` arguments in the workflow above are:
   Euclidean rather than geographic
 - `cluster`: optional clustering column
 - `ncoef`: how many coefficients to report
-- `avc`: upper bound on the average pairwise correlation
+- `avc`: upper bound on the average pairwise correlation of the calibration benchmark
 - `uncond`: whether to skip the conditional adjustment
 - `cvs`: whether to store the extra critical values
 
 ## Documentation
 
 Please refer to [the package documentation](https://spatial-spur.github.io/scpcR/) for detailed information and other (R, Python, Stata) packages.
+
+### Interpreting the intervals
+
+Each interval targets one coefficient. SCPC uses a finite covariance grid to
+calibrate the cutoffs, including when `method="exact"` computes the full
+distance matrix.
+
+For 2SLS, ordinary SCPC t inference requires strong identification and the
+score-process assumptions of Müller and Watson. The default uses the larger of
+the unconditional and conditional cutoffs. The conditional Gaussian guarantee
+requires the stated error model given the endogenous regressors, instruments,
+and controls. See [Müller and Watson (2023), §5.3](https://www.princeton.edu/~mwatson/papers/Mueller_Watson_JBES_2023.pdf#page=15).
+
+For a scalar endogenous regressor `x` and one excluded instrument `z`, an
+Anderson–Rubin test of `beta0` regresses `y - beta0 * x` on `z` and the
+exogenous controls. Test the coefficient on `z` using SCPC under its stated
+conditions for that regression.
+
+```python
+from statsmodels.formula.api import ols
+from scpc import scpc
+
+def ar_pvalue(beta0, data):
+    adjusted = data.assign(y_null=data["y"] - beta0 * data["x"])
+    fit = ols("y_null ~ z + w", data=adjusted).fit()
+    out = scpc(fit, adjusted, coords_euclidean=["s1", "s2"])
+    return out.scpcstats[out.coef_names.index("z"), 3]
+```
+
+Here `w` denotes a control and `s1` and `s2` hold the coordinates. Retain
+candidate values with `ar_pvalue(beta0, data) > 0.05` for a nominal 95%
+confidence set. The set can be disconnected or unbounded.
 
 ## References
 

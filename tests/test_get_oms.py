@@ -29,6 +29,14 @@ def test_get_oms_builds_the_expected_omega_grid() -> None:
     )
 
 
+def test_get_oms_appends_the_finite_endpoint() -> None:
+    distances = np.array([[0.0, 1.0], [1.0, 0.0]])
+    grid = get_oms(distances, 1.0, 3.0, np.eye(2), 2.0)
+    np.testing.assert_allclose(
+        [omega[0, 1] for omega in grid], np.exp(-np.array([1.0, 2.0, 3.0]))
+    )
+
+
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
 def test_python_r_parity_get_oms() -> None:
     distmat = [[0.0, 1.0], [1.0, 0.0]]

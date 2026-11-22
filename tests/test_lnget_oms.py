@@ -6,8 +6,8 @@ import pytest
 
 from scpc.utils.spatial import (
     InvalidSampledCovarianceError,
-    get_nc,
     lnget_oms,
+    sample_covariance_pairs,
     validate_sampled_covariance,
 )
 from tests.config import ATOL, RTOL
@@ -36,7 +36,10 @@ def test_lnget_oms_returns_symmetric_sampled_omega_matrices() -> None:
         latlong=False,
     )
 
-    assert len(oms) == get_nc(0.5, 0.72, 1.2)
+    assert len(oms) == 3
+    (indices, distances), _ = sample_covariance_pairs(s, 20, 1, False)
+    cross = w[indices[:-1]].T @ (w[indices[1:]] * np.exp(-0.72 * distances)[:, None])
+    np.testing.assert_allclose(oms[-1], w.T @ w + (6 / 20) * (cross + cross.T))
     for om in oms:
         assert om.shape == (2, 2)
         npt.assert_allclose(om, om.T, atol=1e-12, rtol=0.0)
@@ -73,7 +76,7 @@ def test_python_r_parity_lnget_oms() -> None:
         payload={
             "s": s,
             "c0": 0.5,
-            "cmax": 0.72,
+            "cmax": 0.73,
             "w": w,
             "cgridfac": 1.2,
             "capM": 20,
@@ -84,7 +87,7 @@ def test_python_r_parity_lnget_oms() -> None:
     py_oms, py_state = lnget_oms(
         np.array(s),
         0.5,
-        0.72,
+        0.73,
         np.array(w),
         1.2,
         capM=20,
@@ -92,8 +95,10 @@ def test_python_r_parity_lnget_oms() -> None:
         latlong=False,
     )
 
-    assert len(py_oms) == len(r_value["Oms"])
-    for py_om, r_om in zip(py_oms, r_value["Oms"], strict=True):
+    # The release fixture covers the geometric candidates before the endpoint.
+    released = r_value["Oms"]
+    assert len(py_oms) == len(released) + 1
+    for py_om, r_om in zip(py_oms[:-1], released, strict=True):
         npt.assert_allclose(py_om, np.array(r_om), atol=ATOL, rtol=RTOL)
     assert py_state == r_value["state"]
 
