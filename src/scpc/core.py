@@ -441,6 +441,8 @@ def scpc(
         if not math.isfinite(se) or se == 0.0:
             raise ValueError("SCPC standard error is outside the floating-point range.")
         tau_u = float(coef_use[j]) / se
+        if not math.isfinite(tau_u):
+            raise ValueError("SCPC t-statistic is outside the floating-point range.")
         p_u = max_rp(omsfin, q, abs(tau_u) / math.sqrt(q))[0]
 
         if xj_mat is not None and cond_residualize is not None:
