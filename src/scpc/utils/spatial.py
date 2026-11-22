@@ -4,7 +4,7 @@ import math
 from fractions import Fraction
 
 import numpy as np
-from scipy import optimize, stats
+from scipy import linalg, optimize, stats
 from scipy.sparse.linalg import eigsh
 
 from ..types import ArrayLike, MatrixLike, SpatialSetup
@@ -134,10 +134,11 @@ def normalize_s(s: MatrixLike, latlong: bool) -> tuple[MatrixLike, ArrayLike]:
         s = s.reshape(-1, 1)
 
     if not latlong:
-        s = s - np.mean(s, axis=0, keepdims=True)
+        s = s - (0.5 * np.min(s, axis=0) + 0.5 * np.max(s, axis=0))
         max_abs = float(np.max(np.abs(s))) if s.size > 0 else 0.0
         if max_abs > 0.0:
             s_scaled = s / max_abs
+            s_scaled -= s_scaled.mean(axis=0)
             evals, rot = np.linalg.eigh(s_scaled.T @ s_scaled)
             rot = rot[:, np.argsort(evals)[::-1]]
             s = s_scaled @ rot
@@ -258,8 +259,9 @@ def lnset_wc0(
     min_norm = math.sqrt(np.finfo(float).eps)
     for i in range(qmax):
         wx = wall[:, : capN * (i + 1)]
-        evals, evecs = np.linalg.eigh(wx.T @ wx)
-        evec = evecs[:, np.argmax(evals)]
+        last = wx.shape[1] - 1
+        _, evecs = linalg.eigh(wx.T @ wx, subset_by_index=(last, last))
+        evec = evecs[:, 0]
         w[:, i] = wx @ evec
         norm = math.sqrt(float(np.sum(w[:, i] ** 2)))
         if not math.isfinite(norm) or norm <= min_norm:

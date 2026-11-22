@@ -18,6 +18,14 @@ def test_normalize_s_normalizes_one_dimensional_euclidean_coords() -> None:
     npt.assert_array_equal(perm, np.array([1, 2, 0]))
 
 
+def test_normalize_s_centers_large_coordinates_before_summing() -> None:
+    base = np.array([[-1.5, 0.25], [0.0, -0.75], [2.0, 1.5], [-0.5, 2.25]])
+    expected, expected_perm = normalize_s(base, latlong=False)
+    actual, perm = normalize_s(1e308 + 1e306 * base, latlong=False)
+    npt.assert_array_equal(perm, expected_perm)
+    npt.assert_allclose(actual, expected, atol=1e-12)
+
+
 @pytest.mark.skipif(R is None, reason="Rscript not installed")
 @pytest.mark.parametrize(
     ("coords", "latlong"),

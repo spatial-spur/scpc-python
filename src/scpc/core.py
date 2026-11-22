@@ -46,7 +46,7 @@ from .utils.spatial import (
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 7
-RUST_MIN_SPEC_VERSION = (0, 3, 6)
+RUST_MIN_SPEC_VERSION = (0, 3, 8)
 
 
 def resolve_backend(backend: object) -> str:
@@ -199,7 +199,7 @@ def scpc(
         raise RuntimeError(
             "Rust backend requested (`backend='rust'`), but a compatible "
             f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is unavailable. "
-            "Build the matching adapter with methods spec 0.3.6 or newer, "
+            "Build the matching adapter with methods spec 0.3.8 or newer, "
             "or use backend='fallback'."
         )
 

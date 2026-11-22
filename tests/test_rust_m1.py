@@ -1074,11 +1074,11 @@ def test_absent_and_incompatible_rust_wheel_handling(
     monkeypatch.setattr(
         "scpc.core.importlib.import_module",
         lambda name: SimpleNamespace(
-            API_VERSION=7, build_info=lambda: {"spec_version": "0.3.5"}
+            API_VERSION=7, build_info=lambda: {"spec_version": "0.3.7"}
         ),
     )
     assert load_rust_backend() is None
-    with pytest.raises(RuntimeError, match="methods spec 0.3.6"):
+    with pytest.raises(RuntimeError, match="methods spec 0.3.8"):
         scpc(model, data, coords_euclidean=("coord_x", "coord_y"), backend="rust")
     res_stale_auto = scpc(
         model, data, coords_euclidean=("coord_x", "coord_y"), backend="auto"
