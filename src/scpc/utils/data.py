@@ -121,15 +121,18 @@ def _eval_pyfixest_rhs_design(
         for term, state in rhs_spec.encoder_state.items()
         if not term.startswith("i(")
     }
-    return rhs_spec.get_model_matrix(data, context=context, encoder_state=encoder_state)
+    design = rhs_spec.get_model_matrix(
+        data, context=context, encoder_state=encoder_state
+    )
+    if not design.index.equals(data.index):
+        raise ValueError("PyFixest design does not line up with the fitted sample.")
+    return design
 
 
 def get_pyfixest_raw_ols_design(model: ModelLike, n: int) -> np.ndarray:
     """Recreate the fitted columns before PyFixest's iterative absorption."""
     data = get_pyfixest_data(model)
     design = _eval_pyfixest_rhs_design(model._model_spec.second_stage.rhs, data, model)
-    if not design.index.equals(data.index):
-        raise ValueError("PyFixest OLS design does not line up with the fitted sample.")
     return get_pyfixest_named_columns(
         design, get_pyfixest_coef_names(model), n=n, context="PyFixest OLS regressor"
     )
@@ -394,64 +397,26 @@ def get_fixest_iv_design(
             "first-stage objects."
         )
 
-    model_spec = getattr(model, "_model_spec", None)
-    exo_source = data
-    if (
-        exo_names
-        and (
-            any(name not in data.columns for name in exo_names)
-            or "Intercept" in exo_names
-        )
-        and model_spec is not None
-        and hasattr(model_spec, "second_stage")
-    ):
-        exo_design = _eval_pyfixest_rhs_design(model_spec.second_stage.rhs, data, model)
-        if exo_design.index.equals(data.index):
-            exo_source = exo_design
-    inst_source = data
-    if (
-        inst_names
-        and any(name not in data.columns for name in inst_names)
-        and model_spec is not None
-        and hasattr(model_spec, "first_stage")
-    ):
-        inst_design = _eval_pyfixest_rhs_design(model_spec.first_stage.rhs, data, model)
-        if inst_design.index.equals(data.index):
-            inst_source = inst_design
-
-    def _source_col(source: DataFrameLike, name: str, context: str) -> np.ndarray:
-        if name in source.columns:
-            col = np.asarray(source[name], dtype=float)
-            if col.shape != (n,):
-                raise ValueError(f"{context} column '{name}' has unexpected shape.")
-            return col
-        if name == "Intercept":
-            return np.ones(n, dtype=float)
-        raise ValueError(f"{context} column '{name}' is missing from stored data.")
-
-    raw_col_map: dict[str, np.ndarray] = {}
-    fit_col_map: dict[str, np.ndarray] = {}
-    for name in exo_names:
-        col = _source_col(exo_source, name, "PyFixest IV exogenous regressor")
-        raw_col_map[name] = col
-        fit_col_map[name] = col
-    for idx, name in enumerate(endo_names):
-        raw_col_map[name] = raw_endog[:, idx]
-        fit_col_map[name] = fit_endog[:, idx]
-
+    model_spec = model._model_spec
+    exo_design = _eval_pyfixest_rhs_design(model_spec.second_stage.rhs, data, model)
+    inst_design = _eval_pyfixest_rhs_design(model_spec.first_stage.rhs, data, model)
+    exo = get_pyfixest_named_columns(
+        exo_design,
+        exo_names,
+        n=n,
+        context="PyFixest IV exogenous regressor",
+    )
     inst = get_pyfixest_named_columns(
-        inst_source,
+        inst_design,
         inst_names,
         n=n,
         context="PyFixest IV instrument",
     )
-    exo_for_z = (
-        np.column_stack([raw_col_map[name] for name in exo_names])
-        if exo_names
-        else np.empty((n, 0), dtype=float)
-    )
+    exogenous = dict(zip(exo_names, exo.T, strict=True))
+    raw_col_map = exogenous | dict(zip(endo_names, raw_endog.T, strict=True))
+    fit_col_map = exogenous | dict(zip(endo_names, fit_endog.T, strict=True))
     x = np.column_stack([raw_col_map[name] for name in coef_names])
-    z = np.column_stack((exo_for_z, inst))
+    z = np.column_stack((exo, inst))
     model_mat = np.column_stack([fit_col_map[name] for name in coef_names])
 
     if x.shape[1] != len(coef_names):

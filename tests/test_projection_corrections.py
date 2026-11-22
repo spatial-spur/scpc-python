@@ -339,6 +339,10 @@ def test_pyfixest_conditional_scpc_preserves_fitted_scale(
     data.loc[::6, "y"] = np.nan
     for name in ("x", "z", "w"):
         data[f"{name}s"] = (data[name] - data[name].mean()) / data[name].std()
+    if iv:
+        # Formula expressions can have the same names as unrelated data columns.
+        data["scale(z)"] = rng.normal(size=n)
+        data["scale(w)"] = rng.normal(size=n)
 
     formula, explicit = (
         ("y ~ scale(z) | fe | x ~ scale(w)", "y ~ zs | fe | x ~ ws")
