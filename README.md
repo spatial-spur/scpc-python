@@ -47,8 +47,8 @@ implementation under `backend="auto"`.
 Each observation in the estimation sample needs a cluster label when clustering
 is requested. Coordinates must be identical within each cluster.
 
-This development branch requires SCPC API 7. Install the adapter from the
-matching shared-core checkout.
+The Rust backend requires SCPC API 7 and methods spec 0.3.6 or newer. Install
+the adapter from the matching shared-core checkout.
 
 ```bash
 uv pip install ../spatial-rust/crates/spatial-py

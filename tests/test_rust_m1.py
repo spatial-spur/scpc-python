@@ -1063,7 +1063,7 @@ def test_absent_and_incompatible_rust_wheel_handling(
     )
     assert res_auto.backend == "fallback"
 
-    # Incompatible API_VERSION must also be rejected cleanly
+    # A compatible wire API can still carry an outdated numerical method.
     monkeypatch.undo()
     monkeypatch.delenv("SPATIAL_BACKEND", raising=False)
     monkeypatch.setattr(
@@ -1071,15 +1071,20 @@ def test_absent_and_incompatible_rust_wheel_handling(
         lambda name: SimpleNamespace(API_VERSION=999),
     )
     assert load_rust_backend() is None
-    with pytest.raises(RuntimeError, match="spatial_spur_rust"):
+    monkeypatch.setattr(
+        "scpc.core.importlib.import_module",
+        lambda name: SimpleNamespace(
+            API_VERSION=7, build_info=lambda: {"spec_version": "0.3.5"}
+        ),
+    )
+    assert load_rust_backend() is None
+    with pytest.raises(RuntimeError, match="methods spec 0.3.6"):
         scpc(model, data, coords_euclidean=("coord_x", "coord_y"), backend="rust")
-    res_bad_abi_auto = scpc(
+    res_stale_auto = scpc(
         model, data, coords_euclidean=("coord_x", "coord_y"), backend="auto"
     )
-    assert res_bad_abi_auto.backend == "fallback"
-    assert (
-        res_bad_abi_auto.fallback_reason == "missing_or_incompatible_native_extension"
-    )
+    assert res_stale_auto.backend == "fallback"
+    assert res_stale_auto.fallback_reason == "missing_or_incompatible_native_extension"
 
 
 def test_unsupported_modes_raise_on_rust_and_fallback_on_auto(

@@ -46,6 +46,7 @@ from .utils.spatial import (
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 7
+RUST_MIN_SPEC_VERSION = (0, 3, 6)
 
 
 def resolve_backend(backend: object) -> str:
@@ -102,12 +103,22 @@ def validate_nthreads(nthreads: object) -> int | None:
 
 
 def load_rust_backend() -> Any | None:
-    """Import the compiled Rust extension module if present and ABI-compatible."""
+    """Import the Rust extension if its ABI and methods version are compatible."""
     try:
         rust_mod = importlib.import_module("spatial_spur_rust")
     except ImportError:
         return None
     if getattr(rust_mod, "API_VERSION", None) != RUST_API_VERSION:
+        return None
+    build_info = getattr(rust_mod, "build_info", None)
+    if not callable(build_info):
+        return None
+    try:
+        version = build_info()["spec_version"]
+        spec = tuple(int(part) for part in version.split("."))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if len(spec) != 3 or spec < RUST_MIN_SPEC_VERSION:
         return None
     return rust_mod
 
@@ -188,7 +199,8 @@ def scpc(
         raise RuntimeError(
             "Rust backend requested (`backend='rust'`), but a compatible "
             f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is unavailable. "
-            "Build the matching development adapter or use backend='fallback'."
+            "Build the matching adapter with methods spec 0.3.6 or newer, "
+            "or use backend='fallback'."
         )
 
     obs_index = get_obs_index(model, data)
