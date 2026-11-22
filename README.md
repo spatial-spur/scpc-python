@@ -57,16 +57,18 @@ uv pip install ../spatial-rust/crates/spatial-py
 Approximate SCPC raises `scpc.InvalidSampledCovarianceError` if its sampled
 covariance matrix is asymmetric or materially indefinite. For samples that fit
 in memory, request `method="exact"` to compute the unsampled covariance.
+Both methods approximate the worst-case calibration over the decay parameter
+using a finite grid.
 For a given seed, all conditional coefficients use the same sampled site pairs.
 Reordering regressors or limiting the number of reported coefficients preserves
 the inference for each retained coefficient.
 
 ## Basic Usage
 
-This example starts from the transformed branch of the Becker, Boll and Voth 2026
-workflow. In the full workflow, you would first use `spurtest` to decide
-whether to stay in levels or transform. Here we assume the transformed branch
-and move directly to the regression plus `scpc` step.
+This example fits a prespecified transformed regression from the Becker, Boll
+and Voth 2026 workflow. `spurtest` can inform a comparison of levels and
+transformed results. The coverage arguments for each prespecified analysis
+require separate justification after selecting a branch using the same data.
 
 ```python
 # assumes spur-python is installed

@@ -112,12 +112,16 @@ def _get_pyfixest_formula_context(model: ModelLike) -> dict[str, object]:
 def _eval_pyfixest_rhs_design(
     rhs_spec: ModelSpec, data: DataFrameLike, model: ModelLike
 ):
-    """Evaluate a PyFixest RHS ModelSpec with a clean encoder state for i() terms."""
+    """Materialize raw columns with the fitted Formulaic transformation state."""
     context = _get_pyfixest_formula_context(model)
-    formula = getattr(rhs_spec, "formula", None)
-    if formula is not None:
-        return formula.get_model_matrix(data, context=context)
-    return rhs_spec.get_model_matrix(data, context=context)
+    # PyFixest's i() encoder needs a fresh state on the retained rows. Preserve
+    # the fitted transformations, column layout, and other categorical encodings.
+    encoder_state = {
+        term: state
+        for term, state in rhs_spec.encoder_state.items()
+        if not term.startswith("i(")
+    }
+    return rhs_spec.get_model_matrix(data, context=context, encoder_state=encoder_state)
 
 
 def get_pyfixest_raw_ols_design(model: ModelLike, n: int) -> np.ndarray:

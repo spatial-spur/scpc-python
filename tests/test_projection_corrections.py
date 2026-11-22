@@ -311,3 +311,49 @@ def test_pyfixest_transforms_and_categorical_fe_parity() -> None:
             np.testing.assert_allclose(rs.scpcstats, fb.scpcstats, rtol=1e-7, atol=1e-7)
             assert rs.scpccvs is not None and fb.scpccvs is not None
             np.testing.assert_allclose(rs.scpccvs, fb.scpccvs, rtol=1e-7, atol=1e-7)
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+@pytest.mark.parametrize("iv", [False, True], ids=["ols", "iv"])
+def test_pyfixest_conditional_scpc_preserves_fitted_scale(
+    backend: str, iv: bool
+) -> None:
+    rng = np.random.default_rng(20261122)
+    n = 60
+    data = pd.DataFrame(
+        {
+            "fe": np.repeat(np.arange(10), 6),
+            "x": rng.normal(size=n),
+            "z": rng.normal(size=n),
+            "w": rng.normal(size=n),
+            "sx": rng.uniform(size=n),
+            "sy": rng.uniform(size=n),
+        }
+    )
+    data["x"] += 0.5 * data["w"]
+    data["y"] = (
+        0.75 * data["x"] + 0.3 * data["z"] + np.sin(data["fe"]) + rng.normal(size=n)
+    )
+    # Formulaic learns the scales before discarding rows with missing outcomes.
+    data.loc[::6, ["x", "z", "w"]] *= 100
+    data.loc[::6, "y"] = np.nan
+    for name in ("x", "z", "w"):
+        data[f"{name}s"] = (data[name] - data[name].mean()) / data[name].std()
+
+    formula, explicit = (
+        ("y ~ scale(z) | fe | x ~ scale(w)", "y ~ zs | fe | x ~ ws")
+        if iv
+        else ("y ~ scale(x) + z | fe", "y ~ xs + z | fe")
+    )
+    fit = pf.feols(formula, data=data)
+    reference = pf.feols(explicit, data=data)
+    np.testing.assert_allclose(fit.coef(), reference.coef(), atol=1e-12)
+    np.testing.assert_allclose(fit.resid(), reference.resid(), atol=1e-12)
+
+    result = scpc(fit, data, coords_euclidean=["sx", "sy"], backend=backend, nthreads=1)
+    expected = scpc(
+        reference, data, coords_euclidean=["sx", "sy"], backend=backend, nthreads=1
+    )
+    np.testing.assert_allclose(
+        result.scpcstats, expected.scpcstats, atol=1e-8, rtol=1e-8
+    )
