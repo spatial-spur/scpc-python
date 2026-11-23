@@ -236,6 +236,10 @@ def lnset_wc0(
         distvec[start:stop] = lvech(distmat)
 
     floor_corr = float(np.mean(distvec == 0.0))
+    if avc0 <= floor_corr:
+        raise ValueError(
+            f"Target correlation avc={avc0} must exceed the pooled landmark co-located-pair fraction {floor_corr:.6f}."
+        )
     minavc_eff = floor_corr + (1.0 - floor_corr) * minavc
     c0 = get_c0_from_avc(distvec, avc0)
     cmax = get_c0_from_avc(distvec, minavc_eff)
@@ -973,6 +977,11 @@ def set_oms_wfin(
             distmat = get_distmat(coords, latlong)
             distv = lvech(distmat)
             floor_corr = float(np.mean(distv == 0.0))
+            if avc0 <= floor_corr:
+                sites = sum(not np.any(row[:i] == 0) for i, row in enumerate(distmat))
+                raise ValueError(
+                    f"Target correlation avc={avc0} must exceed the co-located-pair fraction {floor_corr:.6f} ({sites} distinct locations)."
+                )
             minavc_eff = floor_corr + (1.0 - floor_corr) * MINAVC
             c0 = get_c0_from_avc(distv, avc0)
             cmax = get_c0_from_avc(distv, minavc_eff)

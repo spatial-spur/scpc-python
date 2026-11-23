@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import numpy.testing as npt
 import pandas as pd
@@ -408,3 +410,61 @@ def test_scpc_pyfixest_lean_error_and_extreme_coordinate_scaling() -> None:
             assert np.isfinite(scaled.scpcstats).all()
             npt.assert_allclose(scaled.cv, ref.cv, rtol=1e-10, atol=1e-10)
             npt.assert_allclose(scaled.scpcstats, ref.scpcstats, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize("fixed_effects", ["", "g | "])
+def test_iv_uses_fitted_spline_knots_after_sample_drops(fixed_effects: str) -> None:
+    from formulaic import model_matrix
+
+    rng = np.random.default_rng(331)
+    n = 75
+    z = np.linspace(-2, 2, n)
+    u = rng.normal(size=n)
+    data = pd.DataFrame(
+        dict(
+            z=z,
+            w=rng.normal(size=n),
+            g=np.arange(n) % 5,
+            s=rng.uniform(size=n),
+            t=rng.uniform(size=n),
+        )
+    )
+    data["x"] = 0.9 * z + 0.4 * z**2 + 0.3 * data.w + 0.4 * u
+    data["y"] = 1 + 1.3 * data.x + 0.25 * data.w + u
+    data.loc[[0, 1, 2, 3, 4, 6, 12, 18, 23, 60, 70, 71, 74], "y"] = np.nan
+    instruments = [f"z{j}" for j in range(4)]
+    data[instruments] = np.asarray(model_matrix("1 + bs(z, df=4)", data))[:, 1:]
+    prefix = "y ~ w | " + fixed_effects + "x ~ "
+    spline = pf.feols(prefix + "bs(z, df=4)", data=data)
+    explicit = pf.feols(prefix + " + ".join(instruments), data=data)
+    np.testing.assert_allclose(spline._Z, explicit._Z)
+    from scpc.core import load_rust_backend
+
+    for backend in ["fallback", "rust"] if load_rust_backend() else ["fallback"]:
+        options: dict[str, Any] = dict(
+            coords_euclidean=("s", "t"), avc=0.1, cvs=True, backend=backend
+        )
+        actual = scpc(spline, data, **options)
+        expected = scpc(explicit, data, **options)
+        npt.assert_allclose(
+            actual.scpcstats, expected.scpcstats, atol=1e-10, rtol=1e-10
+        )
+        assert actual.scpccvs is not None and expected.scpccvs is not None
+        npt.assert_allclose(actual.scpccvs, expected.scpccvs, atol=1e-10, rtol=1e-10)
+        # PyFixest accepts a self-instrument by name without FE. With FE its
+        # duplicate-name check requires an alias for the same numeric column.
+        data["copy_x"] = data["x"]
+        self_iv = scpc(
+            pf.feols(prefix + ("copy_x" if fixed_effects else "x"), data=data),
+            data,
+            **options,
+        )
+        ols = scpc(
+            pf.feols("y ~ w + x" + (" | g" if fixed_effects else ""), data=data),
+            data,
+            **options,
+        )
+        order = [self_iv.coef_names.index(name) for name in ols.coef_names]
+        npt.assert_allclose(
+            self_iv.scpcstats[order], ols.scpcstats, atol=1e-10, rtol=1e-10
+        )

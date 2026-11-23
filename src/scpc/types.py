@@ -19,11 +19,16 @@ SCPC_CV_COLUMNS = ["32%", "10%", "5%", "1%"]
 SCPC_CV_LEVELS = {0.68: 0, 0.90: 1, 0.95: 2, 0.99: 3}
 
 
-class FixestSpec(TypedDict):
-    """Stored pyfixest IV design objects aligned to coefficient order."""
+class FixestMatrices(TypedDict):
+    """Structural regressors and instruments on the retained sample."""
 
     X: MatrixLike
     Z: MatrixLike
+
+
+class FixestSpec(FixestMatrices):
+    """Fitted first-stage directions in the original observation space."""
+
     model_mat: MatrixLike
     has_fixef: bool
 

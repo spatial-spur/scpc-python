@@ -14,7 +14,7 @@ from .utils.data import (
     get_coef_names,
     get_conditional_projection_setup,
     get_fixest_bread_inv,
-    get_fixest_iv_design,
+    get_fixest_iv_matrices,
     get_fixest_score_matrix,
     get_obs_index,
     get_pyfixest_raw_ols_design,
@@ -46,7 +46,7 @@ from .utils.spatial import (
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 7
-RUST_MIN_SPEC_VERSION = (0, 3, 8)
+RUST_MIN_SPEC_VERSION = (0, 3, 9)
 
 
 def resolve_backend(backend: object) -> str:
@@ -199,7 +199,7 @@ def scpc(
         raise RuntimeError(
             "Rust backend requested (`backend='rust'`), but a compatible "
             f"`spatial_spur_rust` (API_VERSION={RUST_API_VERSION}) is unavailable. "
-            "Build the matching adapter with methods spec 0.3.8 or newer, "
+            "Build the matching adapter with methods spec 0.3.9 or newer, "
             "or use backend='fallback'."
         )
 
@@ -280,11 +280,11 @@ def scpc(
         else "exact"
     )
     coef_use = np.ascontiguousarray(coef[:k_use], dtype=np.float64)
-    iv_design = get_fixest_iv_design(model) if model_is_iv and not uncond else None
+    iv_matrices = get_fixest_iv_matrices(model) if model_is_iv and not uncond else None
     design = None
     if not uncond:
-        if iv_design is not None:
-            design = iv_design["X"]
+        if iv_matrices is not None:
+            design = iv_matrices["X"]
         elif model_has_fe:
             design = get_pyfixest_raw_ols_design(model, n)
         else:
@@ -310,10 +310,7 @@ def scpc(
                     s,
                     float(avc),
                     design=design,
-                    instruments=None if iv_design is None else iv_design["Z"],
-                    direction_design=None
-                    if iv_design is None
-                    else iv_design["model_mat"],
+                    instruments=None if iv_matrices is None else iv_matrices["Z"],
                     cluster_id=cl_idx,
                     fe_id=fe_id_0based,
                     latlong=bool(latlong),
@@ -361,12 +358,8 @@ def scpc(
     cond_residualize = None
     xj_mat = None
     if design is not None:
-        direction_design = iv_design["model_mat"] if iv_design is not None else design
         cond_setup = get_conditional_projection_setup(
-            model,
-            direction_design,
-            n=n,
-            iv_design=iv_design,
+            model, design, n=n, iv_design=iv_matrices
         )
         model_mat_cond = np.asarray(cond_setup.model_mat, dtype=float)
         if model_mat_cond.shape != (n, p):

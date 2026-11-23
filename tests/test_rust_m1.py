@@ -1078,7 +1078,7 @@ def test_absent_and_incompatible_rust_wheel_handling(
         ),
     )
     assert load_rust_backend() is None
-    with pytest.raises(RuntimeError, match="methods spec 0.3.8"):
+    with pytest.raises(RuntimeError, match="methods spec 0.3.9"):
         scpc(model, data, coords_euclidean=("coord_x", "coord_y"), backend="rust")
     res_stale_auto = scpc(
         model, data, coords_euclidean=("coord_x", "coord_y"), backend="auto"

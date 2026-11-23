@@ -14,6 +14,7 @@ from ..types import (
     ConditionalProjectionSetup,
     CoordinateData,
     DataFrameLike,
+    FixestMatrices,
     FixestSpec,
     MatrixLike,
     ModelLike,
@@ -23,6 +24,7 @@ from .matrix import (
     make_iv_residualizer,
     make_orthogonal_residualizer,
     ols_design_span,
+    orthonormal_design_span,
 )
 
 
@@ -339,108 +341,62 @@ def has_fixest_fe(model: ModelLike) -> bool:
     return fixef_vars is not None and len(fixef_vars) > 0
 
 
-def get_fixest_iv_design(
-    model: ModelLike,
-) -> FixestSpec:
-    """Extract the stored IV design objects from a pyfixest fit.
-
-    This mirrors `scpcR:::.get_fixest_iv_design()`. In the R code that helper
-    rebuilds the design from `stats::model.matrix(..., type = ...)`; in
-    Python, we rebuild the same raw X, Z, and second-stage matrices from the
-    stored sample, the raw endogenous variable, and the fitted first stage.
-
-    Args:
-        model: Fitted pyfixest IV model.
-
-    Returns:
-        The aligned `X`, `Z`, and second-stage model matrix, together with the
-        coefficient names and fixed-effect flag.
-
-    Raises:
-        ValueError: If the model is not an IV second-stage fit or its stored
-            matrices are malformed.
-    """
+def get_fixest_iv_matrices(model: ModelLike) -> FixestMatrices:
+    """Return the structural X and instruments Z on the original fitted sample."""
     if not is_fixest_iv_second_stage(model):
-        raise ValueError(
-            "`get_fixest_iv_design()` requires a pyfixest IV second-stage model."
-        )
+        raise ValueError("Expected a fitted pyfixest IV second-stage model.")
 
     data = get_pyfixest_data(model)
+    spec = model._model_spec
     coef_names = get_pyfixest_coef_names(model)
-    z_names = [str(name) for name in getattr(model, "_coefnames_z", [])]
-    raw_endog = np.asarray(getattr(model, "_endogvar", None), dtype=float)
-    first_stage = getattr(model, "_model_1st_stage", None)
-    if first_stage is None:
-        raise ValueError("Could not extract the stored pyfixest first-stage fit.")
-    fit_endog = np.asarray(getattr(first_stage, "_Y_hat_link", None), dtype=float)
+    z_names = [str(name) for name in model._coefnames_z]
+    endo_names = list(spec.first_stage.lhs.column_names)
+    exo_names = [name for name in coef_names if name not in endo_names]
+    inst_names = [name for name in z_names if name not in exo_names]
+    raw_endog = np.asarray(model._endogvar, dtype=float).reshape(len(data), -1)
+    if len(endo_names) != raw_endog.shape[1]:
+        raise ValueError("PyFixest endogenous columns do not match the fitted design.")
 
-    if raw_endog.ndim == 1:
-        raw_endog = raw_endog[:, None]
-    if fit_endog.ndim == 1:
-        fit_endog = fit_endog[:, None]
-    if raw_endog.ndim != 2 or fit_endog.ndim != 2:
-        raise ValueError("Could not extract the stored pyfixest first-stage objects.")
-
-    n = len(data)
-    if raw_endog.shape[0] != n or fit_endog.shape[0] != n:
-        raise ValueError(
-            "PyFixest first-stage objects do not line up with the stored data sample."
-        )
-
-    exo_names = [name for name in coef_names if name in z_names]
-    endo_names = [name for name in coef_names if name not in z_names]
-    inst_names = [name for name in z_names if name not in coef_names]
-
-    if len(endo_names) != raw_endog.shape[1] or len(endo_names) != fit_endog.shape[1]:
-        raise ValueError(
-            "PyFixest endogenous regressors do not line up with the stored "
-            "first-stage objects."
-        )
-
-    model_spec = model._model_spec
-    exo_design = _eval_pyfixest_rhs_design(model_spec.second_stage.rhs, data, model)
-    inst_design = _eval_pyfixest_rhs_design(model_spec.first_stage.rhs, data, model)
     exo = get_pyfixest_named_columns(
-        exo_design,
+        _eval_pyfixest_rhs_design(spec.second_stage.rhs, data, model),
         exo_names,
-        n=n,
+        n=len(data),
         context="PyFixest IV exogenous regressor",
     )
     inst = get_pyfixest_named_columns(
-        inst_design,
+        _eval_pyfixest_rhs_design(spec.first_stage.rhs, data, model),
         inst_names,
-        n=n,
+        n=len(data),
         context="PyFixest IV instrument",
     )
-    exogenous = dict(zip(exo_names, exo.T, strict=True))
-    raw_col_map = exogenous | dict(zip(endo_names, raw_endog.T, strict=True))
-    fit_col_map = exogenous | dict(zip(endo_names, fit_endog.T, strict=True))
-    x = np.column_stack([raw_col_map[name] for name in coef_names])
+    columns = dict(zip(exo_names, exo.T, strict=True))
+    columns.update(zip(endo_names, raw_endog.T, strict=True))
+    x = np.column_stack([columns[name] for name in coef_names])
     z = np.column_stack((exo, inst))
-    model_mat = np.column_stack([fit_col_map[name] for name in coef_names])
-
-    if x.shape[1] != len(coef_names):
-        raise ValueError(
-            "PyFixest second-stage design columns do not line up with the "
-            "stored coefficients."
-        )
-    if z.shape[1] != len(z_names):
-        raise ValueError(
-            "PyFixest instrument design columns do not line up with the "
-            "stored instrument names."
-        )
-    if (
-        not np.isfinite(x).all()
-        or not np.isfinite(z).all()
-        or not np.isfinite(model_mat).all()
-    ):
+    if not np.isfinite(x).all() or not np.isfinite(z).all():
         raise ValueError("PyFixest IV design extraction produced non-finite values.")
+    return {"X": x, "Z": z}
 
+
+def _fitted_iv_within(model: ModelLike) -> np.ndarray:
+    # The diagnostic first-stage refit can relearn instrument transformations on
+    # a smaller sample. The second-stage fit already stores the absorbed matrices.
+    qz = orthonormal_design_span(np.asarray(model._Z, dtype=float), tol=1e-10)
+    return qz @ (qz.T @ np.asarray(model._X, dtype=float))
+
+
+def get_fixest_iv_design(model: ModelLike) -> FixestSpec:
+    """Recover the fitted first-stage directions, including absorbed effects."""
+    design = get_fixest_iv_matrices(model)
+    fitted = _fitted_iv_within(model)
+    has_fe = has_fixest_fe(model)
+    if has_fe:
+        fitted += design["X"] - np.asarray(model._X, dtype=float)
     return {
-        "X": x,
-        "Z": z,
-        "model_mat": model_mat,
-        "has_fixef": has_fixest_fe(model),
+        "X": design["X"],
+        "Z": design["Z"],
+        "model_mat": fitted,
+        "has_fixef": has_fe,
     }
 
 
@@ -448,7 +404,7 @@ def get_conditional_projection_setup(
     model: ModelLike,
     model_mat: MatrixLike,
     n: int,
-    iv_design: FixestSpec | None = None,
+    iv_design: FixestMatrices | None = None,
 ) -> ConditionalProjectionSetup:
     """Prepare the regression-side objects for conditional SCPC.
 
@@ -479,24 +435,12 @@ def get_conditional_projection_setup(
             )
 
         if is_fixest_iv_second_stage(model):
-            design = get_fixest_iv_design(model) if iv_design is None else iv_design
-            model_mat_iv = np.asarray(design["model_mat"], dtype=float)
+            design = get_fixest_iv_matrices(model) if iv_design is None else iv_design
             x_iv = np.asarray(design["X"], dtype=float)
             z_iv = np.asarray(design["Z"], dtype=float)
-
-            if bool(design["has_fixef"]):
-                demean = make_pyfixest_demeaner(model)
-                model_mat_iv = np.asarray(
-                    demean(
-                        model_mat_iv, context="pyfixest IV second-stage model matrix"
-                    ),
-                    dtype=float,
-                )
-            else:
-                demean = None
-
+            demean = make_pyfixest_demeaner(model) if has_fixest_fe(model) else None
             return ConditionalProjectionSetup(
-                model_mat=model_mat_iv,
+                model_mat=_fitted_iv_within(model),
                 residualize=defer_residualizer(
                     lambda: make_iv_residualizer(
                         x_iv, z_iv, demean=demean, transpose=True
